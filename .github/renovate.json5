@@ -1,0 +1,71 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "config:recommended",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests",
+  ],
+  rebaseWhen: "conflicted",
+  baseBranches: ["main"],
+  ignorePaths: ["docs/**", "releases/**", "licenses/**"],
+  postUpdateOptions: ["gomodTidy"],
+  semanticCommits: "enabled",
+  labels: ["automated", "dependencies"],
+  customManagers: [
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^config\\/scorecard\\/patches\\/.+\\.yaml$/"],
+      matchStrings: [
+        "image: quay.io/operator-framework/scorecard-test:(?<currentValue>.*?)\\n",
+      ],
+      datasourceTemplate: "docker",
+      versioningTemplate: "loose",
+      depNameTemplate: "quay.io/operator-framework/scorecard-test",
+      extractVersionTemplate: "^(?<version>v\\d+\\.\\d+\\.\\d+)",
+    },
+  ],
+  packageRules: [
+    {
+      matchDatasources: ["docker"],
+      allowedVersions: "!/alpha/",
+    },
+    {
+      matchDatasources: ["go"],
+      groupName: "kubernetes patches",
+      matchUpdateTypes: ["patch", "digest"],
+      matchPackageNames: ["k8s.io{/,}**", "sigs.k8s.io{/,}**"],
+      matchDepNames: [
+        "!sigs.k8s.io/kustomize/kustomize/v5",
+        "!sigs.k8s.io/controller-tools",
+      ],
+    },
+    {
+      matchDatasources: ["go"],
+      matchUpdateTypes: ["major", "minor"],
+      matchPackageNames: ["k8s.io{/,}**", "sigs.k8s.io{/,}**"],
+    },
+    {
+      matchDatasources: ["go"],
+      matchUpdateTypes: ["major"],
+      matchPackageNames: ["*", "!k8s.io{/,}**", "!sigs.k8s.io{/,}**"],
+    },
+    {
+      matchDatasources: ["go"],
+      groupName: "all non-major go dependencies",
+      matchUpdateTypes: ["minor", "patch", "digest"],
+      matchPackageNames: ["*", "!k8s.io{/,}**", "!sigs.k8s.io{/,}**"],
+    },
+    {
+      matchDatasources: ["github-tags"],
+      matchUpdateTypes: ["digest", "pinDigest", "minor", "patch"],
+      groupName: "github actions",
+      pinDigests: true,
+    },
+    {
+      groupName: "distroless digests",
+      matchPackageNames: ["gcr.io/distroless{/,}**"],
+      pinDigests: true,
+      separateMajorMinor: false,
+    },
+  ],
+}
