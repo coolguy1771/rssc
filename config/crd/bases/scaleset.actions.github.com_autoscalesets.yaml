@@ -1,0 +1,349 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: autoscalesets.scaleset.actions.github.com
+spec:
+  group: scaleset.actions.github.com
+  names:
+    kind: AutoscaleSet
+    listKind: AutoscaleSetList
+    plural: autoscalesets
+    singular: autoscaleset
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.scaleSetID
+      name: ScaleSetID
+      type: integer
+    - jsonPath: .status.currentRunners
+      name: Current
+      type: integer
+    - jsonPath: .status.desiredRunners
+      name: Desired
+      type: integer
+    - jsonPath: .status.labels[*].name
+      name: Labels
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: AutoscaleSet is the Schema for the autoscalesets API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AutoscaleSetSpec defines the desired state of AutoscaleSet
+            properties:
+              githubApp:
+                description: GitHubApp is GitHub App authentication
+                properties:
+                  clientID:
+                    description: ClientID is the GitHub App Client ID
+                    type: string
+                  installationID:
+                    description: InstallationID is the GitHub App Installation ID
+                    format: int64
+                    type: integer
+                  privateKeySecretRef:
+                    description: |-
+                      PrivateKeySecretRef is a reference to a secret containing the private key
+                      The secret must contain a key named "privateKey" with the PEM-encoded private key
+                    properties:
+                      key:
+                        description: Key is the key in the secret (defaults to "privateKey"
+                          for GitHubApp, "token" for PAT)
+                        type: string
+                      name:
+                        description: Name is the name of the secret
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the secret (defaults
+                          to AutoscaleSet namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - clientID
+                - installationID
+                - privateKeySecretRef
+                type: object
+              githubConfigURL:
+                description: |-
+                  GitHubConfigURL is the URL for the GitHub org/repo/enterprise
+                  Example: https://github.com/org/repo
+                pattern: ^https://.*
+                type: string
+              labels:
+                description: Labels are custom labels for the scale set
+                items:
+                  description: ScaleSetLabel represents a label for the scale set
+                  properties:
+                    name:
+                      description: Name is the label name
+                      type: string
+                    type:
+                      description: 'Type is the label type (default: "System")'
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              maxRunners:
+                default: 10
+                description: MaxRunners is the maximum number of runners
+                format: int32
+                minimum: 1
+                type: integer
+              minRunners:
+                default: 0
+                description: MinRunners is the minimum number of runners to maintain
+                format: int32
+                minimum: 0
+                type: integer
+              personalAccessToken:
+                description: PersonalAccessToken is PAT authentication (alternative
+                  to GitHub App)
+                properties:
+                  tokenSecretRef:
+                    description: |-
+                      TokenSecretRef is a reference to a secret containing the PAT
+                      The secret must contain a key named "token" with the personal access token
+                    properties:
+                      key:
+                        description: Key is the key in the secret (defaults to "privateKey"
+                          for GitHubApp, "token" for PAT)
+                        type: string
+                      name:
+                        description: Name is the name of the secret
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the secret (defaults
+                          to AutoscaleSet namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - tokenSecretRef
+                type: object
+              runnerGroup:
+                default: default
+                description: 'RunnerGroup is the runner group name (default: "default")'
+                type: string
+              runnerImage:
+                description: RunnerImage is the container image for runners
+                type: string
+              runnerTemplate:
+                description: RunnerTemplate is the pod template for creating runners
+                properties:
+                  metadata:
+                    description: Metadata contains labels and annotations for the
+                      pod
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: Annotations are annotations to apply to the pod
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: Labels are labels to apply to the pod
+                        type: object
+                    type: object
+                  spec:
+                    description: Spec is the pod spec
+                    properties:
+                      env:
+                        description: |-
+                          Env are additional environment variables for the runner pod
+                          This is a simplified version - in practice, you might want to use corev1.EnvVar
+                        items:
+                          description: |-
+                            EnvVar represents an environment variable
+                            This is a simplified version - in practice, you might want to use corev1.EnvVar
+                          properties:
+                            name:
+                              type: string
+                            value:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      nodeSelector:
+                        additionalProperties:
+                          type: string
+                        description: NodeSelector is a selector which must be true
+                          for the pod to fit on a node
+                        type: object
+                      resources:
+                        description: |-
+                          Resources are the resource requirements for the runner pod
+                          This is a simplified version - in practice, you might want to use corev1.ResourceRequirements
+                        properties:
+                          limits:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          requests:
+                            additionalProperties:
+                              type: string
+                            type: object
+                        type: object
+                      tolerations:
+                        description: |-
+                          Tolerations allow the pod to be scheduled on nodes with matching taints
+                          This is a simplified version - in practice, you might want to use corev1.Toleration
+                        items:
+                          description: |-
+                            Toleration represents a Kubernetes toleration
+                            This is a simplified version - in practice, you might want to use corev1.Toleration
+                          properties:
+                            effect:
+                              type: string
+                            key:
+                              type: string
+                            operator:
+                              type: string
+                            value:
+                              type: string
+                          type: object
+                        type: array
+                    type: object
+                type: object
+              scaleSetName:
+                description: |-
+                  ScaleSetName is the name of the scale set
+                  This must be unique within the runner group
+                minLength: 1
+                type: string
+            required:
+            - githubConfigURL
+            - runnerImage
+            - scaleSetName
+            type: object
+          status:
+            description: AutoscaleSetStatus defines the observed state of AutoscaleSet
+            properties:
+              conditions:
+                description: Conditions represent the latest available observations
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              currentRunners:
+                description: CurrentRunners is the current number of runners
+                format: int32
+                type: integer
+              desiredRunners:
+                description: DesiredRunners is the desired number of runners
+                format: int32
+                type: integer
+              labels:
+                description: Labels are the current labels on the scale set in GitHub
+                items:
+                  description: ScaleSetLabel represents a label for the scale set
+                  properties:
+                    name:
+                      description: Name is the label name
+                      type: string
+                    type:
+                      description: 'Type is the label type (default: "System")'
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              lastMessageID:
+                description: LastMessageID is the last processed message ID
+                type: integer
+              phase:
+                description: Phase is the current phase (Pending, Active, Error)
+                type: string
+              scaleSetID:
+                description: ScaleSetID is the GitHub scale set ID
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,93 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mutating-webhook-configuration
+  labels:
+    app.kubernetes.io/name: scaleset-controller
+webhooks:
+- name: mautoscaleset.kb.io
+  clientConfig:
+    service:
+      namespace: system
+      name: webhook-service
+      path: /mutate-scaleset-actions-github-com-v1alpha1-autoscaleset
+  rules:
+  - apiGroups:
+    - scaleset.actions.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - autoscalesets
+  admissionReviewVersions:
+  - v1
+  sideEffects: None
+- name: mrunnerset.kb.io
+  clientConfig:
+    service:
+      namespace: system
+      name: webhook-service
+      path: /mutate-scaleset-actions-github-com-v1alpha1-runnerset
+  rules:
+  - apiGroups:
+    - scaleset.actions.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - runnersets
+  admissionReviewVersions:
+  - v1
+  sideEffects: None
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+  labels:
+    app.kubernetes.io/name: scaleset-controller
+webhooks:
+- name: vautoscaleset.kb.io
+  clientConfig:
+    service:
+      namespace: system
+      name: webhook-service
+      path: /validate-scaleset-actions-github-com-v1alpha1-autoscaleset
+  rules:
+  - apiGroups:
+    - scaleset.actions.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - autoscalesets
+  admissionReviewVersions:
+  - v1
+  sideEffects: None
+- name: vrunnerset.kb.io
+  clientConfig:
+    service:
+      namespace: system
+      name: webhook-service
+      path: /validate-scaleset-actions-github-com-v1alpha1-runnerset
+  rules:
+  - apiGroups:
+    - scaleset.actions.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - runnersets
+  admissionReviewVersions:
+  - v1
+  sideEffects: None

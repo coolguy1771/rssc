@@ -1,0 +1,13 @@
+apiVersion: scaleset.actions.github.com/v1alpha1
+kind: RunnerSet
+metadata:
+  name: my-runnerset
+  namespace: default
+spec:
+  autoscaleSetRef:
+    name: my-autoscaleset
+  runnerGroup: default
+  runnerTemplate:
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux

@@ -1,0 +1,28 @@
+apiVersion: scaleset.actions.github.com/v1alpha1
+kind: RunnerSet
+metadata:
+  labels:
+    app.kubernetes.io/name: scaleset-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: runnerset-sample
+spec:
+  autoscaleSetRef:
+    name: autoscaleset-sample
+    namespace: default
+  runnerGroup: default
+  runnerTemplate:
+    metadata:
+      labels:
+        environment: staging
+        team: backend
+        custom-label: my-value
+    spec:
+      nodeSelector:
+        node-type: compute
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"

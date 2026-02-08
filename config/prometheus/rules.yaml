@@ -1,0 +1,74 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: scaleset-controller-alerts
+  namespace: system
+  labels:
+    control-plane: controller-manager
+spec:
+  groups:
+  - name: scaleset-controller
+    interval: 30s
+    rules:
+    - alert: ScalesetControllerDown
+      expr: up{job="controller-manager-metrics-service"} == 0
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Scaleset controller is down"
+        description: "The scaleset controller has been down for more than 5 minutes."
+
+    - alert: HighReconciliationErrors
+      expr: rate(controller_runtime_reconcile_errors_total[5m]) > 0.1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High reconciliation error rate"
+        description: "The controller is experiencing a high rate of reconciliation errors."
+
+    - alert: ScaleSetCreationFailed
+      expr: rate(scaleset_operations_total{operation="create",status="error"}[5m]) > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Scale set creation failures"
+        description: "Scale set creation operations are failing."
+
+    - alert: SessionConflicts
+      expr: rate(scaleset_session_conflicts_total[5m]) > 0.1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High session conflict rate"
+        description: "Multiple session conflicts detected, indicating potential controller restarts or conflicts."
+
+    - alert: RunnerPodCreationFailures
+      expr: rate(scaleset_runner_pod_lifecycle_total{event="created",result="error"}[5m]) > 0.1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Runner pod creation failures"
+        description: "High rate of runner pod creation failures detected."
+
+    - alert: HighJobQueueTime
+      expr: histogram_quantile(0.95, rate(scaleset_job_queue_time_seconds_bucket[5m])) > 300
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High job queue time"
+        description: "Jobs are spending too long in queue (P95 > 5 minutes)."
+
+    - alert: ScalingConstraintsHit
+      expr: rate(scaleset_scaling_constraints_total[5m]) > 0.1
+      for: 10m
+      labels:
+        severity: info
+      annotations:
+        summary: "Scaling constraints being hit"
+        description: "Scaling operations are being constrained by min/max runner limits."

@@ -1,0 +1,46 @@
+apiVersion: scaleset.actions.github.com/v1alpha1
+kind: AutoscaleSet
+metadata:
+  labels:
+    app.kubernetes.io/name: scaleset-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: autoscaleset-sample
+spec:
+  githubConfigURL: https://github.com/your-org
+  scaleSetName: my-scale-set
+  runnerImage: ghcr.io/actions/runner:latest
+  runnerGroup: default
+  minRunners: 0
+  maxRunners: 10
+  # GitHub Actions labels for workflow scheduling
+  # Note: "self-hosted" label is automatically added by the controller
+  # Use these labels in your workflows: runs-on: [self-hosted, linux, gpu]
+  labels:
+    - type: System
+      name: linux
+    - type: User
+      name: gpu
+    - type: User
+      name: production
+  runnerTemplate:
+    metadata:
+      labels:
+        environment: production
+        team: platform
+        app: github-runner
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+  githubApp:
+    clientID: "your-client-id"
+    installationID: 123456
+    privateKeySecretRef:
+      name: github-app-secret
+      namespace: default

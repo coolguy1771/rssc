@@ -1,0 +1,119 @@
+---
+customMetrics:
+#  - metric: # Raw custom metric (required)
+#    type:   # Metric type: counter/gauge/histogram (required)
+#    expr:   # Prom_ql for the metric (optional)
+#    unit:   # Unit of measurement, examples: s,none,bytes,percent,etc. (optional)
+#
+#
+# Example:
+# ---
+# customMetrics:
+#   - metric: foo_bar
+#     unit: none
+#     type: histogram
+#     expr: histogram_quantile(0.90, sum by(instance, le) (rate(foo_bar{job=\"$job\", namespace=\"$namespace\"}[5m])))
+  # Gauge metrics
+  - metric: scaleset_autoscaleset_total
+    type: gauge
+    unit: none
+  - metric: scaleset_runnerset_total
+    type: gauge
+    unit: none
+  - metric: scaleset_runner_pods_total
+    type: gauge
+    unit: none
+  - metric: scaleset_runner_pods_idle
+    type: gauge
+    unit: none
+  - metric: scaleset_runner_pods_busy
+    type: gauge
+    unit: none
+  - metric: scaleset_listener_active
+    type: gauge
+    unit: none
+  - metric: scaleset_runner_pod_status
+    type: gauge
+    unit: none
+  - metric: scaleset_queued_jobs
+    type: gauge
+    unit: none
+  - metric: scaleset_statistics
+    type: gauge
+    unit: none
+  - metric: scaleset_limits
+    type: gauge
+    unit: none
+
+  # Counter metrics
+  - metric: scaleset_operations_total
+    type: counter
+    unit: none
+  - metric: scaleset_runner_pod_lifecycle_total
+    type: counter
+    unit: none
+  - metric: scaleset_runner_scaling_operations_total
+    type: counter
+    unit: none
+  - metric: scaleset_runner_state_transitions_total
+    type: counter
+    unit: none
+  - metric: scaleset_job_lifecycle_total
+    type: counter
+    unit: none
+  - metric: scaleset_session_operations_total
+    type: counter
+    unit: none
+  - metric: scaleset_session_conflicts_total
+    type: counter
+    unit: none
+  - metric: scaleset_jit_config_generation_total
+    type: counter
+    unit: none
+  - metric: scaleset_listener_messages_processed_total
+    type: counter
+    unit: none
+  - metric: scaleset_listener_message_errors_total
+    type: counter
+    unit: none
+  - metric: scaleset_scaling_constraints_total
+    type: counter
+    unit: none
+  - metric: scaleset_github_api_call_errors_total
+    type: counter
+    unit: none
+  - metric: scaleset_job_repository_total
+    type: counter
+    unit: none
+  - metric: scaleset_job_workflow_total
+    type: counter
+    unit: none
+
+  # Histogram metrics
+  - metric: scaleset_reconciliation_duration_seconds
+    type: histogram
+    unit: s
+  - metric: scaleset_runner_scaling_amount
+    type: histogram
+    unit: none
+  - metric: scaleset_job_queue_time_seconds
+    type: histogram
+    unit: s
+  - metric: scaleset_job_execution_time_seconds
+    type: histogram
+    unit: s
+  - metric: scaleset_runner_pod_age_seconds
+    type: histogram
+    unit: s
+  - metric: scaleset_runner_pod_creation_duration_seconds
+    type: histogram
+    unit: s
+  - metric: scaleset_runner_pod_deletion_duration_seconds
+    type: histogram
+    unit: s
+  - metric: scaleset_jit_config_generation_duration_seconds
+    type: histogram
+    unit: s
+  - metric: scaleset_github_api_call_duration_seconds
+    type: histogram
+    unit: s

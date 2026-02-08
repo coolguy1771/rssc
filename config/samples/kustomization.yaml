@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- scaleset_v1alpha1_autoscaleset.yaml
+- scaleset_v1alpha1_runnerset.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
