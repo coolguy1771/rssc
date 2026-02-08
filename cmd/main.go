@@ -154,7 +154,7 @@ func setupControllersAndRunnables(mgr ctrl.Manager) error {
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		ClientFactory: clientFactory,
-		Recorder:      mgr.GetEventRecorderFor("autoscaleset-controller"),
+		Recorder:      mgr.GetEventRecorder("autoscaleset-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		return err
 	}
@@ -163,7 +163,7 @@ func setupControllersAndRunnables(mgr ctrl.Manager) error {
 		Scheme:          mgr.GetScheme(),
 		ClientFactory:   clientFactory,
 		ListenerManager: listenerManager,
-		Recorder:        mgr.GetEventRecorderFor("runnerset-controller"),
+		Recorder:        mgr.GetEventRecorder("runnerset-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		return err
 	}

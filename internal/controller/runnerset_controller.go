@@ -41,7 +41,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -58,7 +58,7 @@ type RunnerSetReconciler struct {
 	Scheme          *runtime.Scheme
 	ClientFactory   *client.ClientFactory
 	ListenerManager *listener.Manager
-	Recorder        record.EventRecorder
+	Recorder        events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=scaleset.actions.github.com,resources=runnersets,verbs=get;list;watch;create;update;patch;delete
@@ -93,7 +93,10 @@ func (r *RunnerSetReconciler) Reconcile(
 	}
 
 	if !runnerSet.DeletionTimestamp.IsZero() {
-		return r.handleDeletion(ctx, runnerSet, logger)
+		if err := r.handleDeletion(ctx, runnerSet, logger); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
 	if !controllerutil.ContainsFinalizer(runnerSet, constants.RunnerSetFinalizerName) {
@@ -159,7 +162,7 @@ func (r *RunnerSetReconciler) reconcileExistingListener(
 		runnerSet.Annotations[constants.AnnotationPodSpecHash] != currentPodSpecHash
 
 	if !needsRollout {
-		return r.updateStatus(ctx, runnerSet, logger)
+		return r.updateStatus(ctx, runnerSet)
 	}
 
 	oldHash := "none"
@@ -172,7 +175,9 @@ func (r *RunnerSetReconciler) reconcileExistingListener(
 	if err := r.rolloutRunnerPods(ctx, runnerSet, logger); err != nil {
 		logger.Error(err, "Failed to rollout runner pods")
 	}
-	r.ListenerManager.StopListener(listenerKey)
+	if err := r.ListenerManager.StopListener(listenerKey); err != nil {
+		logger.Error(err, "Failed to stop listener during rollout")
+	}
 	if runnerSet.Annotations == nil {
 		runnerSet.Annotations = make(map[string]string)
 	}
@@ -249,8 +254,8 @@ func (r *RunnerSetReconciler) startListener(
 			fmt.Sprintf("Failed to start listener: %v", err), logger)
 	}
 
-	r.Recorder.Event(runnerSet, corev1.EventTypeNormal, "ListenerStarted",
-		fmt.Sprintf("Started listener for runner group %s", runnerSet.Spec.RunnerGroup),
+	r.Recorder.Eventf(runnerSet, nil, corev1.EventTypeNormal, "ListenerStarted", "ListenerStarted",
+		"Started listener for runner group %s", runnerSet.Spec.RunnerGroup,
 	)
 
 	if err := r.setRunnerSetListenerAnnotations(ctx, runnerSet, autoscaleSet); err != nil {
@@ -259,10 +264,10 @@ func (r *RunnerSetReconciler) startListener(
 
 	autoscaleSetName := runnerSet.Spec.AutoscaleSetRef.Name
 	if autoscaleSetName == "" {
-		autoscaleSetName = "unknown"
+		autoscaleSetName = constants.LabelValueUnknown
 	}
 	metrics.ListenerStatus.WithLabelValues(runnerSet.Namespace, autoscaleSetName, runnerSet.Spec.RunnerGroup).Set(1)
-	return r.updateStatus(ctx, runnerSet, logger)
+	return r.updateStatus(ctx, runnerSet)
 }
 
 func (r *RunnerSetReconciler) createMessageSession(
@@ -293,7 +298,7 @@ func (r *RunnerSetReconciler) createMessageSession(
 		).Inc()
 		if r.ListenerManager.HasListener(listenerKey) {
 			logger.Info("Session already exists but listener is running, continuing", "error", err)
-			res, _ := r.updateStatus(ctx, runnerSet, logger)
+			res, _ := r.updateStatus(ctx, runnerSet)
 			return nil, &res, nil
 		}
 		logger.Info("Session conflict detected - previous session still active. Waiting for it to expire before retrying",
@@ -329,7 +334,6 @@ func (r *RunnerSetReconciler) setRunnerSetListenerAnnotations(
 func (r *RunnerSetReconciler) updateStatus(
 	ctx context.Context,
 	runnerSet *scalesetv1alpha1.RunnerSet,
-	logger logr.Logger,
 ) (ctrl.Result, error) {
 	pods, err := r.getRunnerPods(ctx, runnerSet)
 	if err != nil {
@@ -342,13 +346,14 @@ func (r *RunnerSetReconciler) updateStatus(
 
 	autoscaleSetName := runnerSet.Spec.AutoscaleSetRef.Name
 	if autoscaleSetName == "" {
-		autoscaleSetName = "unknown"
+		autoscaleSetName = constants.LabelValueUnknown
 	}
 
 	for _, pod := range pods {
-		if pod.Labels[constants.LabelRunnerState] == constants.RunnerStateIdle {
+		switch pod.Labels[constants.LabelRunnerState] {
+		case constants.RunnerStateIdle:
 			idleCount++
-		} else if pod.Labels[constants.LabelRunnerState] == constants.RunnerStateBusy {
+		case constants.RunnerStateBusy:
 			busyCount++
 		}
 
@@ -362,7 +367,7 @@ func (r *RunnerSetReconciler) updateStatus(
 			age := now.Sub(pod.CreationTimestamp.Time).Seconds()
 			state := pod.Labels[constants.LabelRunnerState]
 			if state == "" {
-				state = "unknown"
+				state = constants.LabelValueUnknown
 			}
 			metrics.RunnerPodAge.WithLabelValues(
 				runnerSet.Namespace,
@@ -501,12 +506,7 @@ func (r *RunnerSetReconciler) updateStatusError(
 
 	logger.Error(nil, message, "reason", reason)
 
-	r.Recorder.Event(
-		runnerSet,
-		corev1.EventTypeWarning,
-		reason,
-		message,
-	)
+	r.Recorder.Eventf(runnerSet, nil, corev1.EventTypeWarning, reason, reason, "%s", message)
 
 	return ctrl.Result{RequeueAfter: constants.RequeueErrorInterval}, nil
 }
@@ -515,9 +515,9 @@ func (r *RunnerSetReconciler) handleDeletion(
 	ctx context.Context,
 	runnerSet *scalesetv1alpha1.RunnerSet,
 	logger logr.Logger,
-) (ctrl.Result, error) {
+) error {
 	if !controllerutil.ContainsFinalizer(runnerSet, constants.RunnerSetFinalizerName) {
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	autoscaleSet, err := r.getAutoscaleSet(ctx, runnerSet)
@@ -531,29 +531,28 @@ func (r *RunnerSetReconciler) handleDeletion(
 		}
 
 		if r.ListenerManager.HasListener(listenerKey) {
-			r.ListenerManager.StopListener(listenerKey)
+			if err := r.ListenerManager.StopListener(listenerKey); err != nil {
+				logger.Error(err, "Failed to stop listener during deletion")
+			}
 			logger.Info(
 				"Stopped listener for runner set",
 				"runnerGroup", runnerSet.Spec.RunnerGroup,
 			)
 
-			r.Recorder.Event(
-				runnerSet,
-				corev1.EventTypeNormal,
-				"ListenerStopped",
-				fmt.Sprintf("Stopped listener for runner group %s", runnerSet.Spec.RunnerGroup),
+			r.Recorder.Eventf(runnerSet, nil, corev1.EventTypeNormal, "ListenerStopped", "ListenerStopped",
+				"Stopped listener for runner group %s", runnerSet.Spec.RunnerGroup,
 			)
 		}
 	}
 
 	controllerutil.RemoveFinalizer(runnerSet, constants.RunnerSetFinalizerName)
 	if err := r.Update(ctx, runnerSet); err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
 	autoscaleSetName := runnerSet.Spec.AutoscaleSetRef.Name
 	if autoscaleSetName == "" {
-		autoscaleSetName = "unknown"
+		autoscaleSetName = constants.LabelValueUnknown
 	}
 
 	metrics.RunnerSetTotal.WithLabelValues(
@@ -567,7 +566,7 @@ func (r *RunnerSetReconciler) handleDeletion(
 		runnerSet.Spec.RunnerGroup,
 	).Set(0)
 
-	return ctrl.Result{}, nil
+	return nil
 }
 
 func (r *RunnerSetReconciler) mapAutoscaleSetToRunnerSets(
@@ -778,11 +777,8 @@ func (r *RunnerSetReconciler) rolloutRunnerPods(
 			"deletedCount", deletedCount,
 			"totalPods", len(pods),
 		)
-		r.Recorder.Event(
-			runnerSet,
-			corev1.EventTypeNormal,
-			"RunnerPodsRolledOut",
-			fmt.Sprintf("Rolled out %d idle runner pods", deletedCount),
+		r.Recorder.Eventf(runnerSet, nil, corev1.EventTypeNormal, "RunnerPodsRolledOut", "RunnerPodsRolledOut",
+			"Rolled out %d idle runner pods", deletedCount,
 		)
 	}
 

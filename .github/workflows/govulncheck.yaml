@@ -16,7 +16,6 @@ env:
 
 jobs:
   vulnerabilities:
-    if: ${{ github.repository == 'CrunchyData/postgres-operator' }}
     permissions:
       security-events: write
 

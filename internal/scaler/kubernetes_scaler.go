@@ -113,7 +113,7 @@ func (k *KubernetesScaler) HandleDesiredRunnerCount(
 	).Set(float64(count))
 
 	if targetCount > currentCount {
-		return k.handleScaleUp(ctx, currentCount, targetCount, count)
+		return k.handleScaleUp(ctx, currentCount, targetCount)
 	}
 	if targetCount < currentCount {
 		return k.handleScaleDown(ctx, currentPods, currentCount, targetCount)
@@ -123,7 +123,7 @@ func (k *KubernetesScaler) HandleDesiredRunnerCount(
 
 func (k *KubernetesScaler) handleScaleUp(
 	ctx context.Context,
-	currentCount, targetCount, queuedJobs int,
+	currentCount, targetCount int,
 ) (int, error) {
 	scaleUp := targetCount - currentCount
 	if targetCount == k.maxRunners && currentCount < k.maxRunners {

@@ -25,6 +25,10 @@ const (
 
 	RunnerStateIdle = "idle"
 	RunnerStateBusy = "busy"
+
+	// Phase and label values used in status/metrics
+	PhaseActive       = "Active"
+	LabelValueUnknown = "unknown"
 )
 
 // Requeue intervals

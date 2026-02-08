@@ -36,7 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,7 +53,7 @@ type AutoscaleSetReconciler struct {
 	k8sclient.Client
 	Scheme        *runtime.Scheme
 	ClientFactory *client.ClientFactory
-	Recorder      record.EventRecorder
+	Recorder      events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=scaleset.actions.github.com,resources=autoscalesets,verbs=get;list;watch;create;update;patch;delete
@@ -87,9 +87,9 @@ func (r *AutoscaleSetReconciler) Reconcile(
 		return r.handleDeletion(ctx, autoscaleSet, logger)
 	}
 
-	res, err, done := r.ensureFinalizer(ctx, autoscaleSet)
+	err, done := r.ensureFinalizer(ctx, autoscaleSet)
 	if done {
-		return res, err
+		return ctrl.Result{}, err
 	}
 
 	return r.reconcileActive(ctx, autoscaleSet, logger)
@@ -102,15 +102,15 @@ func (r *AutoscaleSetReconciler) recordReconcileDuration(kind, namespace, name s
 func (r *AutoscaleSetReconciler) ensureFinalizer(
 	ctx context.Context,
 	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
-) (ctrl.Result, error, bool) {
+) (error, bool) {
 	if controllerutil.ContainsFinalizer(autoscaleSet, constants.FinalizerName) {
-		return ctrl.Result{}, nil, false
+		return nil, false
 	}
 	controllerutil.AddFinalizer(autoscaleSet, constants.FinalizerName)
 	if err := r.Update(ctx, autoscaleSet); err != nil {
-		return ctrl.Result{}, err, true
+		return err, true
 	}
-	return ctrl.Result{}, nil, true
+	return nil, true
 }
 
 func (r *AutoscaleSetReconciler) reconcileActive(
@@ -201,8 +201,8 @@ func (r *AutoscaleSetReconciler) createScaleSet(
 	).Inc()
 	metrics.AutoscaleSetTotal.WithLabelValues(autoscaleSet.Namespace, autoscaleSet.Status.Phase).Set(1)
 	logger.Info("Created scale set", "scaleSetID", created.ID, "labels", formatLabelsForLog(created.Labels))
-	r.Recorder.Event(autoscaleSet, corev1.EventTypeNormal, "ScaleSetCreated",
-		fmt.Sprintf("Successfully created scale set %s with ID %d", autoscaleSet.Spec.ScaleSetName, created.ID),
+	r.Recorder.Eventf(autoscaleSet, nil, corev1.EventTypeNormal, "ScaleSetCreated", "ScaleSetCreated",
+		"Successfully created scale set %s with ID %d", autoscaleSet.Spec.ScaleSetName, created.ID,
 	)
 	return ctrl.Result{}, nil
 }
@@ -241,7 +241,7 @@ func (r *AutoscaleSetReconciler) setCreateScaleSetStatus(
 	created *scaleset.RunnerScaleSet,
 ) {
 	autoscaleSet.Status.ScaleSetID = &created.ID
-	autoscaleSet.Status.Phase = "Active"
+	autoscaleSet.Status.Phase = constants.PhaseActive
 	if created.Labels != nil {
 		autoscaleSet.Status.Labels = make([]scalesetv1alpha1.ScaleSetLabel, len(created.Labels))
 		for i, label := range created.Labels {
@@ -289,7 +289,7 @@ func (r *AutoscaleSetReconciler) updateScaleSet(
 
 	r.recordUpdateScaleSetMetrics(autoscaleSet)
 	metrics.ReconciliationRate.WithLabelValues("autoscaleset", "success").Inc()
-	if autoscaleSet.Status.Phase == "Active" &&
+	if autoscaleSet.Status.Phase == constants.PhaseActive &&
 		meta.IsStatusConditionTrue(autoscaleSet.Status.Conditions, "Ready") {
 		return ctrl.Result{RequeueAfter: constants.RequeueActiveInterval}, nil
 	}
@@ -353,8 +353,8 @@ func (r *AutoscaleSetReconciler) maybeUpdateScaleSetLabels(
 		return scaleSet, err
 	}
 	logger.Info("Successfully updated scale set labels", "scaleSetID", *autoscaleSet.Status.ScaleSetID, "labels", formatLabelsForLog(updated.Labels))
-	r.Recorder.Event(autoscaleSet, corev1.EventTypeNormal, "ScaleSetLabelsUpdated",
-		fmt.Sprintf("Updated labels for scale set %d", *autoscaleSet.Status.ScaleSetID),
+	r.Recorder.Eventf(autoscaleSet, nil, corev1.EventTypeNormal, "ScaleSetLabelsUpdated", "ScaleSetLabelsUpdated",
+		"Updated labels for scale set %d", *autoscaleSet.Status.ScaleSetID,
 	)
 	return updated, nil
 }
@@ -380,7 +380,7 @@ func (r *AutoscaleSetReconciler) setUpdateScaleSetStatus(
 			autoscaleSet.Status.CurrentRunners = int32(count)
 		}
 	}
-	autoscaleSet.Status.Phase = "Active"
+	autoscaleSet.Status.Phase = constants.PhaseActive
 	meta.SetStatusCondition(&autoscaleSet.Status.Conditions, metav1.Condition{
 		Type: "Ready", Status: metav1.ConditionTrue, Reason: "ScaleSetActive",
 		Message: "Scale set is active", ObservedGeneration: autoscaleSet.Generation,
@@ -440,8 +440,8 @@ func (r *AutoscaleSetReconciler) deleteScaleSetInGitHub(
 		return ctrl.Result{}, err
 	}
 	logger.Info("Deleted scale set", "scaleSetID", *autoscaleSet.Status.ScaleSetID)
-	r.Recorder.Event(autoscaleSet, corev1.EventTypeNormal, "ScaleSetDeleted",
-		fmt.Sprintf("Successfully deleted scale set with ID %d", *autoscaleSet.Status.ScaleSetID),
+	r.Recorder.Eventf(autoscaleSet, nil, corev1.EventTypeNormal, "ScaleSetDeleted", "ScaleSetDeleted",
+		"Successfully deleted scale set with ID %d", *autoscaleSet.Status.ScaleSetID,
 	)
 	return ctrl.Result{}, nil
 }
@@ -485,12 +485,7 @@ func (r *AutoscaleSetReconciler) updateStatusError(
 
 	logger.Error(nil, message, "reason", reason)
 
-	r.Recorder.Event(
-		autoscaleSet,
-		corev1.EventTypeWarning,
-		reason,
-		message,
-	)
+	r.Recorder.Eventf(autoscaleSet, nil, corev1.EventTypeWarning, reason, reason, "%s", message)
 
 	return ctrl.Result{RequeueAfter: constants.RequeueErrorInterval}, nil
 }

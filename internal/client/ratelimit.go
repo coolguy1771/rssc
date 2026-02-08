@@ -2,14 +2,12 @@ package client
 
 import (
 	"context"
-	"sync"
 
 	"golang.org/x/time/rate"
 )
 
 type RateLimiter struct {
 	limiter *rate.Limiter
-	mu      sync.Mutex
 }
 
 func NewRateLimiter(requestsPerSecond float64, burst int) *RateLimiter {
