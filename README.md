@@ -65,11 +65,7 @@ make build
 make run
 ```
 
-Production entry point (webhooks, leader election, metrics, listener shutdown, cache cleanup):
-
-```bash
-go run ./cmd/main.go
-```
+Entry point is `cmd/main.go` (webhooks, leader election, metrics, listener shutdown, cache cleanup).
 
 ## Testing
 
@@ -101,6 +97,10 @@ make test-e2e
 - **Manager/RBAC/Webhook**: `config/manager/`, `config/rbac/`, `config/webhook/`
 - **Samples**: `config/samples/`
 - **OLM**: `config/manifests/`, `config/scorecard/`
+
+## Runner pod resources
+
+In namespaces with ResourceQuota or LimitRange, set `runnerTemplate.spec.resources.requests` (and optionally `limits`) on the AutoscaleSet or RunnerSet so runner pods are admitted. The controller does not apply default resource requests.
 
 ## Conventions
 

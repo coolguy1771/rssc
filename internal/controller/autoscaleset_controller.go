@@ -87,7 +87,7 @@ func (r *AutoscaleSetReconciler) Reconcile(
 		return r.handleDeletion(ctx, autoscaleSet, logger)
 	}
 
-	err, done := r.ensureFinalizer(ctx, autoscaleSet)
+	done, err := r.ensureFinalizer(ctx, autoscaleSet)
 	if done {
 		return ctrl.Result{}, err
 	}
@@ -102,15 +102,15 @@ func (r *AutoscaleSetReconciler) recordReconcileDuration(kind, namespace, name s
 func (r *AutoscaleSetReconciler) ensureFinalizer(
 	ctx context.Context,
 	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
-) (error, bool) {
+) (bool, error) {
 	if controllerutil.ContainsFinalizer(autoscaleSet, constants.FinalizerName) {
-		return nil, false
+		return false, nil
 	}
 	controllerutil.AddFinalizer(autoscaleSet, constants.FinalizerName)
 	if err := r.Update(ctx, autoscaleSet); err != nil {
-		return err, true
+		return true, err
 	}
-	return nil, true
+	return true, nil
 }
 
 func (r *AutoscaleSetReconciler) reconcileActive(

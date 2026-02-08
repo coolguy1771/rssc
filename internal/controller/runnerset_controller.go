@@ -331,6 +331,74 @@ func (r *RunnerSetReconciler) setRunnerSetListenerAnnotations(
 	return r.Update(ctx, runnerSet)
 }
 
+// runnerStatusSummary holds counts derived from runner pods for status and metrics.
+type runnerStatusSummary struct {
+	IdleCount       int32
+	BusyCount       int32
+	PodStatusCounts map[string]int32
+}
+
+func computeRunnerStatusFromPods(
+	pods []corev1.Pod,
+	namespace, autoscaleSetName, runnerGroup string,
+) runnerStatusSummary {
+	now := time.Now()
+	var s runnerStatusSummary
+	s.PodStatusCounts = make(map[string]int32)
+	for _, pod := range pods {
+		switch pod.Labels[constants.LabelRunnerState] {
+		case constants.RunnerStateIdle:
+			s.IdleCount++
+		case constants.RunnerStateBusy:
+			s.BusyCount++
+		}
+		phase := string(pod.Status.Phase)
+		if phase == "" {
+			phase = "Unknown"
+		}
+		s.PodStatusCounts[phase]++
+		if !pod.CreationTimestamp.IsZero() {
+			age := now.Sub(pod.CreationTimestamp.Time).Seconds()
+			state := pod.Labels[constants.LabelRunnerState]
+			if state == "" {
+				state = constants.LabelValueUnknown
+			}
+			metrics.RunnerPodAge.WithLabelValues(
+				namespace, autoscaleSetName, runnerGroup, state,
+			).Observe(age)
+		}
+	}
+	return s
+}
+
+func recordRunnerSetMetrics(
+	s *runnerStatusSummary,
+	namespace, autoscaleSetName, runnerGroup string,
+) {
+	metrics.RunnerSetTotal.WithLabelValues(namespace, "active").Set(1)
+	metrics.RunnerPodsTotal.WithLabelValues(
+		namespace, autoscaleSetName, runnerGroup, "idle",
+	).Set(float64(s.IdleCount))
+	metrics.RunnerPodsTotal.WithLabelValues(
+		namespace, autoscaleSetName, runnerGroup, "busy",
+	).Set(float64(s.BusyCount))
+	metrics.RunnerPodsIdle.WithLabelValues(
+		namespace, autoscaleSetName, runnerGroup,
+	).Set(float64(s.IdleCount))
+	metrics.RunnerPodsBusy.WithLabelValues(
+		namespace, autoscaleSetName, runnerGroup,
+	).Set(float64(s.BusyCount))
+	metrics.ListenerStatus.WithLabelValues(
+		namespace, autoscaleSetName, runnerGroup,
+	).Set(1)
+	for phase, count := range s.PodStatusCounts {
+		metrics.RunnerPodStatus.WithLabelValues(
+			namespace, autoscaleSetName, runnerGroup, phase,
+		).Set(float64(count))
+	}
+	metrics.ReconciliationRate.WithLabelValues("runnerset", "success").Inc()
+}
+
 func (r *RunnerSetReconciler) updateStatus(
 	ctx context.Context,
 	runnerSet *scalesetv1alpha1.RunnerSet,
@@ -339,55 +407,22 @@ func (r *RunnerSetReconciler) updateStatus(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-
-	var idleCount, busyCount int32
-	podStatusCounts := make(map[string]int32)
-	now := time.Now()
-
 	autoscaleSetName := runnerSet.Spec.AutoscaleSetRef.Name
 	if autoscaleSetName == "" {
 		autoscaleSetName = constants.LabelValueUnknown
 	}
-
-	for _, pod := range pods {
-		switch pod.Labels[constants.LabelRunnerState] {
-		case constants.RunnerStateIdle:
-			idleCount++
-		case constants.RunnerStateBusy:
-			busyCount++
-		}
-
-		phase := string(pod.Status.Phase)
-		if phase == "" {
-			phase = "Unknown"
-		}
-		podStatusCounts[phase]++
-
-		if !pod.CreationTimestamp.IsZero() {
-			age := now.Sub(pod.CreationTimestamp.Time).Seconds()
-			state := pod.Labels[constants.LabelRunnerState]
-			if state == "" {
-				state = constants.LabelValueUnknown
-			}
-			metrics.RunnerPodAge.WithLabelValues(
-				runnerSet.Namespace,
-				autoscaleSetName,
-				runnerSet.Spec.RunnerGroup,
-				state,
-			).Observe(age)
-		}
-	}
-
+	summary := computeRunnerStatusFromPods(
+		pods, runnerSet.Namespace, autoscaleSetName, runnerSet.Spec.RunnerGroup,
+	)
 	if err := r.Get(ctx, types.NamespacedName{
 		Namespace: runnerSet.Namespace,
 		Name:      runnerSet.Name,
 	}, runnerSet); err != nil {
 		return ctrl.Result{}, err
 	}
-
 	runnerSet.Status.RunnerCount = int32(len(pods))
-	runnerSet.Status.IdleRunners = idleCount
-	runnerSet.Status.BusyRunners = busyCount
+	runnerSet.Status.IdleRunners = summary.IdleCount
+	runnerSet.Status.BusyRunners = summary.BusyCount
 	meta.SetStatusCondition(&runnerSet.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
@@ -395,66 +430,15 @@ func (r *RunnerSetReconciler) updateStatus(
 		Message:            "Listener is active",
 		ObservedGeneration: runnerSet.Generation,
 	})
-
 	if err := r.Status().Update(ctx, runnerSet); err != nil {
 		if k8serrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, nil
 		}
 		return ctrl.Result{}, err
 	}
-
-	metrics.RunnerSetTotal.WithLabelValues(
-		runnerSet.Namespace,
-		"active",
-	).Set(1)
-
-	metrics.RunnerPodsTotal.WithLabelValues(
-		runnerSet.Namespace,
-		autoscaleSetName,
-		runnerSet.Spec.RunnerGroup,
-		"idle",
-	).Set(float64(idleCount))
-
-	metrics.RunnerPodsTotal.WithLabelValues(
-		runnerSet.Namespace,
-		autoscaleSetName,
-		runnerSet.Spec.RunnerGroup,
-		"busy",
-	).Set(float64(busyCount))
-
-	metrics.RunnerPodsIdle.WithLabelValues(
-		runnerSet.Namespace,
-		autoscaleSetName,
-		runnerSet.Spec.RunnerGroup,
-	).Set(float64(idleCount))
-
-	metrics.RunnerPodsBusy.WithLabelValues(
-		runnerSet.Namespace,
-		autoscaleSetName,
-		runnerSet.Spec.RunnerGroup,
-	).Set(float64(busyCount))
-
-	metrics.ListenerStatus.WithLabelValues(
-		runnerSet.Namespace,
-		autoscaleSetName,
-		runnerSet.Spec.RunnerGroup,
-	).Set(1)
-
-	for phase, count := range podStatusCounts {
-		metrics.RunnerPodStatus.WithLabelValues(
-			runnerSet.Namespace,
-			autoscaleSetName,
-			runnerSet.Spec.RunnerGroup,
-			phase,
-		).Set(float64(count))
-	}
-
-	metrics.ReconciliationRate.WithLabelValues("runnerset", "success").Inc()
+	recordRunnerSetMetrics(&summary, runnerSet.Namespace, autoscaleSetName, runnerSet.Spec.RunnerGroup)
 	if runnerSet.Status.RunnerCount > 0 ||
-		meta.IsStatusConditionTrue(
-			runnerSet.Status.Conditions,
-			"Ready",
-		) {
+		meta.IsStatusConditionTrue(runnerSet.Status.Conditions, "Ready") {
 		return ctrl.Result{RequeueAfter: constants.RequeueActiveInterval}, nil
 	}
 	return ctrl.Result{RequeueAfter: constants.RequeueScaleSetIDWait}, nil

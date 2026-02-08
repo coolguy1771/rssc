@@ -18,6 +18,7 @@ spec:
       annotations:
         summary: "Scaleset controller is down"
         description: "The scaleset controller has been down for more than 5 minutes."
+        runbook_url: "https://github.com/coolguy1771/rssc/blob/main/docs/monitoring/runbooks/ScalesetControllerDown.md"
 
     - alert: HighReconciliationErrors
       expr: rate(controller_runtime_reconcile_errors_total[5m]) > 0.1
@@ -27,6 +28,7 @@ spec:
       annotations:
         summary: "High reconciliation error rate"
         description: "The controller is experiencing a high rate of reconciliation errors."
+        runbook_url: "https://github.com/coolguy1771/rssc/blob/main/docs/monitoring/runbooks/HighReconciliationErrors.md"
 
     - alert: ScaleSetCreationFailed
       expr: rate(scaleset_operations_total{operation="create",status="error"}[5m]) > 0
@@ -36,6 +38,7 @@ spec:
       annotations:
         summary: "Scale set creation failures"
         description: "Scale set creation operations are failing."
+        runbook_url: "https://github.com/coolguy1771/rssc/blob/main/docs/monitoring/runbooks/ScaleSetCreationFailed.md"
 
     - alert: SessionConflicts
       expr: rate(scaleset_session_conflicts_total[5m]) > 0.1
@@ -45,6 +48,7 @@ spec:
       annotations:
         summary: "High session conflict rate"
         description: "Multiple session conflicts detected, indicating potential controller restarts or conflicts."
+        runbook_url: "https://github.com/coolguy1771/rssc/blob/main/docs/monitoring/runbooks/SessionConflicts.md"
 
     - alert: RunnerPodCreationFailures
       expr: rate(scaleset_runner_pod_lifecycle_total{event="created",result="error"}[5m]) > 0.1
@@ -54,6 +58,7 @@ spec:
       annotations:
         summary: "Runner pod creation failures"
         description: "High rate of runner pod creation failures detected."
+        runbook_url: "https://github.com/coolguy1771/rssc/blob/main/docs/monitoring/runbooks/RunnerPodCreationFailures.md"
 
     - alert: HighJobQueueTime
       expr: histogram_quantile(0.95, rate(scaleset_job_queue_time_seconds_bucket[5m])) > 300
@@ -63,6 +68,7 @@ spec:
       annotations:
         summary: "High job queue time"
         description: "Jobs are spending too long in queue (P95 > 5 minutes)."
+        runbook_url: "https://github.com/coolguy1771/rssc/blob/main/docs/monitoring/runbooks/HighJobQueueTime.md"
 
     - alert: ScalingConstraintsHit
       expr: rate(scaleset_scaling_constraints_total[5m]) > 0.1
@@ -72,3 +78,4 @@ spec:
       annotations:
         summary: "Scaling constraints being hit"
         description: "Scaling operations are being constrained by min/max runner limits."
+        runbook_url: "https://github.com/coolguy1771/rssc/blob/main/docs/monitoring/runbooks/ScalingConstraintsHit.md"

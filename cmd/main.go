@@ -25,6 +25,7 @@ import (
 
 	scalesetv1alpha1 "github.com/coolguy1771/rssc/api/v1alpha1"
 	"github.com/coolguy1771/rssc/internal/client"
+	"github.com/coolguy1771/rssc/internal/constants"
 	"github.com/coolguy1771/rssc/internal/controller"
 	"github.com/coolguy1771/rssc/internal/listener"
 	_ "github.com/coolguy1771/rssc/internal/metrics"
@@ -33,11 +34,16 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -146,6 +152,23 @@ func buildMetricsOptions(f managerFlags) (metricsserver.Options, *certwatcher.Ce
 	return opts, metricsCertWatcher, nil
 }
 
+func buildCacheOptions() (cache.Options, error) {
+	req, err := labels.NewRequirement(
+		constants.LabelAutoscaleSet,
+		selection.Exists,
+		nil,
+	)
+	if err != nil {
+		return cache.Options{}, err
+	}
+	podSelector := labels.NewSelector().Add(*req)
+	return cache.Options{
+		ByObject: map[k8sclient.Object]cache.ByObject{
+			&corev1.Pod{}: {Label: podSelector},
+		},
+	}, nil
+}
+
 func setupControllersAndRunnables(mgr ctrl.Manager) error {
 	clientFactory := client.NewClientFactory(mgr.GetClient())
 	listenerManager := listener.NewManager(ctrl.Log.WithName("listener-manager"))
@@ -206,8 +229,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	cacheOpts, err := buildCacheOptions()
+	if err != nil {
+		setupLog.Error(err, "unable to build cache options")
+		os.Exit(1)
+	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
+		Cache:                  cacheOpts,
 		Metrics:                metricsOpts,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: f.probeAddr,
