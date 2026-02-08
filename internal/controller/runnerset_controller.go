@@ -21,14 +21,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/actions/scaleset"
 	scalesetv1alpha1 "github.com/coolguy1771/rssc/api/v1alpha1"
 	"github.com/coolguy1771/rssc/internal/client"
+	"github.com/coolguy1771/rssc/internal/constants"
+	rsscerrors "github.com/coolguy1771/rssc/internal/errors"
 	"github.com/coolguy1771/rssc/internal/listener"
 	"github.com/coolguy1771/rssc/internal/metrics"
 	"github.com/coolguy1771/rssc/internal/scaler"
@@ -37,7 +39,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -49,10 +50,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-)
-
-const (
-	RunnerSetFinalizerName = "scaleset.actions.github.com/runnerset-finalizer"
 )
 
 // RunnerSetReconciler reconciles a RunnerSet object
@@ -80,13 +77,9 @@ func (r *RunnerSetReconciler) Reconcile(
 ) (ctrl.Result, error) {
 	startTime := time.Now()
 	logger := log.FromContext(ctx)
+	logger.Info("Reconciling RunnerSet", "namespace", req.Namespace, "name", req.Name)
 	defer func() {
-		duration := time.Since(startTime).Seconds()
-		metrics.ReconciliationDuration.WithLabelValues(
-			"runnerset",
-			req.Namespace,
-			req.Name,
-		).Observe(duration)
+		metrics.ReconciliationDuration.WithLabelValues("runnerset", req.Namespace, req.Name).Observe(time.Since(startTime).Seconds())
 	}()
 
 	runnerSet := &scalesetv1alpha1.RunnerSet{}
@@ -103,8 +96,8 @@ func (r *RunnerSetReconciler) Reconcile(
 		return r.handleDeletion(ctx, runnerSet, logger)
 	}
 
-	if !controllerutil.ContainsFinalizer(runnerSet, RunnerSetFinalizerName) {
-		controllerutil.AddFinalizer(runnerSet, RunnerSetFinalizerName)
+	if !controllerutil.ContainsFinalizer(runnerSet, constants.RunnerSetFinalizerName) {
+		controllerutil.AddFinalizer(runnerSet, constants.RunnerSetFinalizerName)
 		if err := r.Update(ctx, runnerSet); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -113,101 +106,81 @@ func (r *RunnerSetReconciler) Reconcile(
 
 	autoscaleSet, err := r.getAutoscaleSet(ctx, runnerSet)
 	if err != nil {
-		if k8serrors.IsNotFound(err) {
-			return r.updateStatusError(
-				ctx,
-				runnerSet,
-				"AutoscaleSetNotFound",
-				fmt.Sprintf("AutoscaleSet %s/%s not found", runnerSet.Spec.AutoscaleSetRef.Namespace, runnerSet.Spec.AutoscaleSetRef.Name),
-				logger,
-			)
-		}
-		return r.updateStatusError(
-			ctx,
-			runnerSet,
-			"AutoscaleSetError",
-			fmt.Sprintf("Failed to get AutoscaleSet: %v", err),
-			logger,
-		)
+		return r.reconcileAutoscaleSetError(ctx, runnerSet, err, logger)
 	}
 
 	if !autoscaleSet.DeletionTimestamp.IsZero() {
-		return r.updateStatusError(
-			ctx,
-			runnerSet,
-			"AutoscaleSetDeleting",
-			fmt.Sprintf("AutoscaleSet %s/%s is being deleted", autoscaleSet.Namespace, autoscaleSet.Name),
-			logger,
-		)
+		return r.updateStatusError(ctx, runnerSet, "AutoscaleSetDeleting",
+			fmt.Sprintf("AutoscaleSet %s/%s is being deleted", autoscaleSet.Namespace, autoscaleSet.Name), logger)
 	}
 
 	if autoscaleSet.Status.ScaleSetID == nil {
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: constants.RequeueScaleSetIDWait}, nil
 	}
 
 	listenerKey := listener.ListenerKey{
-		AutoscaleSet: types.NamespacedName{
-			Namespace: autoscaleSet.Namespace,
-			Name:      autoscaleSet.Name,
-		},
-		RunnerGroup: runnerSet.Spec.RunnerGroup,
+		AutoscaleSet: types.NamespacedName{Namespace: autoscaleSet.Namespace, Name: autoscaleSet.Name},
+		RunnerGroup:  runnerSet.Spec.RunnerGroup,
 	}
 
 	if r.ListenerManager.HasListener(listenerKey) {
-		// Check if pod spec or runner config changed
-		currentPodSpecHash := r.computePodSpecHash(
-			autoscaleSet.Spec.RunnerImage,
-			runnerSet.Spec.RunnerTemplate,
-			autoscaleSet.Spec.RunnerTemplate,
-		)
+		return r.reconcileExistingListener(ctx, runnerSet, autoscaleSet, listenerKey, logger)
+	}
+	return r.startListener(ctx, runnerSet, autoscaleSet, listenerKey, logger)
+}
 
-		needsRollout := false
-		if runnerSet.Annotations != nil {
-			lastHash := runnerSet.Annotations["scaleset.actions.github.com/pod-spec-hash"]
-			if lastHash != currentPodSpecHash {
-				needsRollout = true
-			}
-		} else {
-			needsRollout = true
-		}
+func (r *RunnerSetReconciler) reconcileAutoscaleSetError(
+	ctx context.Context,
+	runnerSet *scalesetv1alpha1.RunnerSet,
+	err error,
+	logger logr.Logger,
+) (ctrl.Result, error) {
+	if k8serrors.IsNotFound(err) {
+		return r.updateStatusError(ctx, runnerSet, "AutoscaleSetNotFound",
+			fmt.Sprintf("AutoscaleSet %s/%s not found", runnerSet.Spec.AutoscaleSetRef.Namespace, runnerSet.Spec.AutoscaleSetRef.Name), logger)
+	}
+	return r.updateStatusError(ctx, runnerSet, "AutoscaleSetError",
+		fmt.Sprintf("Failed to get AutoscaleSet: %v", err), logger)
+}
 
-		if needsRollout {
-			oldHash := "none"
-			if runnerSet.Annotations != nil {
-				if h := runnerSet.Annotations["scaleset.actions.github.com/pod-spec-hash"]; h != "" {
-					oldHash = h
-				}
-			}
-			logger.Info(
-				"Pod spec or runner config changed, rolling out update",
-				"autoscaleSet", autoscaleSet.Name,
-				"oldHash", oldHash,
-				"newHash", currentPodSpecHash,
-			)
+func (r *RunnerSetReconciler) reconcileExistingListener(
+	ctx context.Context,
+	runnerSet *scalesetv1alpha1.RunnerSet,
+	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
+	listenerKey listener.ListenerKey,
+	logger logr.Logger,
+) (ctrl.Result, error) {
+	currentPodSpecHash := r.computePodSpecHash(
+		autoscaleSet.Spec.RunnerImage,
+		runnerSet.Spec.RunnerTemplate,
+		autoscaleSet.Spec.RunnerTemplate,
+	)
+	needsRollout := runnerSet.Annotations == nil ||
+		runnerSet.Annotations[constants.AnnotationPodSpecHash] != currentPodSpecHash
 
-			// Delete idle pods to force recreation with new spec
-			if err := r.rolloutRunnerPods(ctx, runnerSet, logger); err != nil {
-				logger.Error(err, "Failed to rollout runner pods")
-			}
-
-			// Restart listener with new configuration
-			r.ListenerManager.StopListener(listenerKey)
-			if runnerSet.Annotations == nil {
-				runnerSet.Annotations = make(map[string]string)
-			}
-			runnerSet.Annotations["scaleset.actions.github.com/pod-spec-hash"] =
-				currentPodSpecHash
-			runnerSet.Annotations["scaleset.actions.github.com/last-autoscaleset-generation"] =
-				fmt.Sprintf("%d", autoscaleSet.Generation)
-			if err := r.Update(ctx, runnerSet); err != nil {
-				logger.Error(err, "Failed to update RunnerSet annotations")
-			}
-			return r.startListener(ctx, runnerSet, autoscaleSet, listenerKey, logger)
-		}
-
+	if !needsRollout {
 		return r.updateStatus(ctx, runnerSet, logger)
 	}
 
+	oldHash := "none"
+	if runnerSet.Annotations != nil && runnerSet.Annotations[constants.AnnotationPodSpecHash] != "" {
+		oldHash = runnerSet.Annotations[constants.AnnotationPodSpecHash]
+	}
+	logger.Info("Pod spec or runner config changed, rolling out update",
+		"autoscaleSet", autoscaleSet.Name, "oldHash", oldHash, "newHash", currentPodSpecHash)
+
+	if err := r.rolloutRunnerPods(ctx, runnerSet, logger); err != nil {
+		logger.Error(err, "Failed to rollout runner pods")
+	}
+	r.ListenerManager.StopListener(listenerKey)
+	if runnerSet.Annotations == nil {
+		runnerSet.Annotations = make(map[string]string)
+	}
+	runnerSet.Annotations[constants.AnnotationPodSpecHash] = currentPodSpecHash
+	runnerSet.Annotations[constants.AnnotationLastAutoscaleSetGeneration] = fmt.Sprintf("%d", autoscaleSet.Generation)
+	if err := r.Update(ctx, runnerSet); err != nil {
+		logger.Error(err, "Failed to update RunnerSet annotations")
+	}
 	return r.startListener(ctx, runnerSet, autoscaleSet, listenerKey, logger)
 }
 
@@ -238,233 +211,119 @@ func (r *RunnerSetReconciler) startListener(
 	listenerKey listener.ListenerKey,
 	logger logr.Logger,
 ) (ctrl.Result, error) {
-	scalesetClient, err := r.getScalesetClient(ctx, autoscaleSet)
+	scalesetClient, err := r.ClientFactory.CreateClientForAutoscaleSet(ctx, autoscaleSet, client.SubsystemListener)
 	if err != nil {
-		return r.updateStatusError(
-			ctx,
-			runnerSet,
-			"ClientCreationFailed",
-			fmt.Sprintf("Failed to create scaleset client: %v", err),
-			logger,
-		)
+		return r.updateStatusError(ctx, runnerSet, "ClientCreationFailed",
+			fmt.Sprintf("Failed to create scaleset client: %v", err), logger)
 	}
 
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = fmt.Sprintf("controller-%s", runnerSet.UID)
-	}
-
-	sessionClient, err := scalesetClient.MessageSessionClient(
-		ctx,
-		*autoscaleSet.Status.ScaleSetID,
-		hostname,
-	)
-	if err != nil {
-		errStr := err.Error()
-		if (strings.Contains(errStr, "status=409") ||
-			strings.Contains(errStr, "status=\"409\"")) &&
-			strings.Contains(errStr, "already has an active session") {
-			metrics.SessionOperations.WithLabelValues(
-				runnerSet.Namespace,
-				autoscaleSet.Name,
-				runnerSet.Spec.RunnerGroup,
-				"create",
-				"conflict",
-			).Inc()
-
-			metrics.SessionConflicts.WithLabelValues(
-				runnerSet.Namespace,
-				autoscaleSet.Name,
-				runnerSet.Spec.RunnerGroup,
-				hostname,
-			).Inc()
-
-			if r.ListenerManager.HasListener(listenerKey) {
-				logger.Info(
-					"Session already exists but listener is running, continuing",
-					"error", err,
-				)
-				return r.updateStatus(ctx, runnerSet, logger)
-			}
-			logger.Info(
-				"Session conflict detected - previous session still active. Waiting for it to expire before retrying",
-				"hostname", hostname,
-				"error", err,
-			)
-			return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
+	sessionClient, res, err := r.createMessageSession(ctx, runnerSet, autoscaleSet, scalesetClient, listenerKey, logger)
+	if err != nil || res != nil {
+		if res != nil {
+			return *res, err
 		}
-
-		metrics.SessionOperations.WithLabelValues(
-			runnerSet.Namespace,
-			autoscaleSet.Name,
-			runnerSet.Spec.RunnerGroup,
-			"create",
-			"error",
-		).Inc()
-
-		return r.updateStatusError(
-			ctx,
-			runnerSet,
-			"SessionCreationFailed",
-			fmt.Sprintf("Failed to create message session: %v", err),
-			logger,
-		)
+		return ctrl.Result{}, err
 	}
 
-	metrics.SessionOperations.WithLabelValues(
-		runnerSet.Namespace,
-		autoscaleSet.Name,
-		runnerSet.Spec.RunnerGroup,
-		"create",
-		"success",
-	).Inc()
-
-	maxRunners := 10
+	minRunners := constants.DefaultMinRunners
+	if autoscaleSet.Spec.MinRunners != nil {
+		minRunners = int(*autoscaleSet.Spec.MinRunners)
+	}
+	maxRunners := constants.DefaultMaxRunners
 	if autoscaleSet.Spec.MaxRunners != nil {
 		maxRunners = int(*autoscaleSet.Spec.MaxRunners)
 	}
 
-	minRunners := 0
-	if autoscaleSet.Spec.MinRunners != nil {
-		minRunners = int(*autoscaleSet.Spec.MinRunners)
-	}
-
-	podTemplate := r.mergeRunnerTemplates(
-		autoscaleSet.Spec.RunnerTemplate,
-		runnerSet.Spec.RunnerTemplate,
-	)
-
+	podTemplate := r.mergeRunnerTemplates(autoscaleSet.Spec.RunnerTemplate, runnerSet.Spec.RunnerTemplate)
 	kubernetesScaler := scaler.NewKubernetesScaler(
-		r.Client,
-		scalesetClient,
-		*autoscaleSet.Status.ScaleSetID,
-		runnerSet.Namespace,
-		autoscaleSet.Spec.RunnerImage,
-		runnerSet.Spec.RunnerGroup,
-		minRunners,
-		maxRunners,
-		podTemplate,
-		logger,
+		r.Client, scalesetClient, *autoscaleSet.Status.ScaleSetID,
+		runnerSet.Namespace, autoscaleSet.Spec.RunnerImage, runnerSet.Spec.RunnerGroup,
+		minRunners, maxRunners, podTemplate, r.ClientFactory.GetRateLimiter(), logger,
 	)
+	kubernetesScaler.SetOwnerReference(autoscaleSet, autoscaleSet.APIVersion, autoscaleSet.Kind)
+	debouncedScaler := scaler.NewDebouncedScaler(kubernetesScaler, constants.DebounceWindow, logger)
 
-	kubernetesScaler.SetOwnerReference(
-		autoscaleSet,
-		autoscaleSet.APIVersion,
-		autoscaleSet.Kind,
-	)
-
-	if err := r.ListenerManager.StartListener(
-		ctx,
-		listenerKey,
-		sessionClient,
-		*autoscaleSet.Status.ScaleSetID,
-		maxRunners,
-		kubernetesScaler,
-	); err != nil {
-		return r.updateStatusError(
-			ctx,
-			runnerSet,
-			"ListenerStartFailed",
-			fmt.Sprintf("Failed to start listener: %v", err),
-			logger,
-		)
+	if err := r.ListenerManager.StartListener(ctx, listenerKey, sessionClient,
+		*autoscaleSet.Status.ScaleSetID, maxRunners, debouncedScaler); err != nil {
+		return r.updateStatusError(ctx, runnerSet, "ListenerStartFailed",
+			fmt.Sprintf("Failed to start listener: %v", err), logger)
 	}
 
-	r.Recorder.Event(
-		runnerSet,
-		corev1.EventTypeNormal,
-		"ListenerStarted",
+	r.Recorder.Event(runnerSet, corev1.EventTypeNormal, "ListenerStarted",
 		fmt.Sprintf("Started listener for runner group %s", runnerSet.Spec.RunnerGroup),
 	)
 
-	// Update annotation to track AutoscaleSet generation
-	if err := r.Get(ctx, types.NamespacedName{
-		Namespace: runnerSet.Namespace,
-		Name:      runnerSet.Name,
-	}, runnerSet); err != nil {
+	if err := r.setRunnerSetListenerAnnotations(ctx, runnerSet, autoscaleSet); err != nil {
 		return ctrl.Result{}, err
-	}
-	if runnerSet.Annotations == nil {
-		runnerSet.Annotations = make(map[string]string)
-	}
-	// Store pod spec hash for change detection
-	podSpecHash := r.computePodSpecHash(
-		autoscaleSet.Spec.RunnerImage,
-		runnerSet.Spec.RunnerTemplate,
-		autoscaleSet.Spec.RunnerTemplate,
-	)
-	runnerSet.Annotations["scaleset.actions.github.com/pod-spec-hash"] =
-		podSpecHash
-	runnerSet.Annotations["scaleset.actions.github.com/last-autoscaleset-generation"] =
-		fmt.Sprintf("%d", autoscaleSet.Generation)
-	if err := r.Update(ctx, runnerSet); err != nil {
-		logger.Error(err, "Failed to update RunnerSet annotations")
 	}
 
 	autoscaleSetName := runnerSet.Spec.AutoscaleSetRef.Name
 	if autoscaleSetName == "" {
 		autoscaleSetName = "unknown"
 	}
-
-	metrics.ListenerStatus.WithLabelValues(
-		runnerSet.Namespace,
-		autoscaleSetName,
-		runnerSet.Spec.RunnerGroup,
-	).Set(1)
-
+	metrics.ListenerStatus.WithLabelValues(runnerSet.Namespace, autoscaleSetName, runnerSet.Spec.RunnerGroup).Set(1)
 	return r.updateStatus(ctx, runnerSet, logger)
 }
 
-func (r *RunnerSetReconciler) getScalesetClient(
+func (r *RunnerSetReconciler) createMessageSession(
 	ctx context.Context,
+	runnerSet *scalesetv1alpha1.RunnerSet,
 	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
-) (*scaleset.Client, error) {
-	config := client.ClientConfig{
-		GitHubConfigURL: autoscaleSet.Spec.GitHubConfigURL,
-		SystemInfo: scaleset.SystemInfo{
-			System:     "actions-runner-controller",
-			Version:    "v1alpha1",
-			CommitSHA:  "unknown",
-			ScaleSetID: *autoscaleSet.Status.ScaleSetID,
-			Subsystem:  "listener",
-		},
+	scalesetClient *scaleset.Client,
+	listenerKey listener.ListenerKey,
+	logger logr.Logger,
+) (*scaleset.MessageSessionClient, *ctrl.Result, error) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = fmt.Sprintf("controller-%s", runnerSet.UID)
 	}
-
-	if autoscaleSet.Spec.GitHubApp != nil {
-		appConfig, err := r.ClientFactory.LoadGitHubAppFromSecret(
-			ctx,
-			autoscaleSet.Namespace,
-			types.NamespacedName{
-				Namespace: autoscaleSet.Spec.GitHubApp.PrivateKeySecretRef.Namespace,
-				Name:      autoscaleSet.Spec.GitHubApp.PrivateKeySecretRef.Name,
-			},
-			autoscaleSet.Spec.GitHubApp.ClientID,
-			autoscaleSet.Spec.GitHubApp.InstallationID,
-		)
-		if err != nil {
-			return nil, err
-		}
-		config.GitHubApp = appConfig
-	} else if autoscaleSet.Spec.PersonalAccessToken != nil {
-		patConfig, err := r.ClientFactory.LoadPATFromSecret(
-			ctx,
-			autoscaleSet.Namespace,
-			types.NamespacedName{
-				Namespace: autoscaleSet.Spec.PersonalAccessToken.TokenSecretRef.Namespace,
-				Name:      autoscaleSet.Spec.PersonalAccessToken.TokenSecretRef.Name,
-			},
-		)
-		if err != nil {
-			return nil, err
-		}
-		config.PAT = patConfig
-	} else {
-		return nil, fmt.Errorf(
-			"either GitHubApp or PersonalAccessToken must be specified",
-		)
+	sessionClient, err := scalesetClient.MessageSessionClient(ctx, *autoscaleSet.Status.ScaleSetID, hostname)
+	if err == nil {
+		metrics.SessionOperations.WithLabelValues(
+			runnerSet.Namespace, autoscaleSet.Name, runnerSet.Spec.RunnerGroup, "create", "success",
+		).Inc()
+		return sessionClient, nil, nil
 	}
+	if rsscerrors.IsSessionConflict(err) {
+		metrics.SessionOperations.WithLabelValues(
+			runnerSet.Namespace, autoscaleSet.Name, runnerSet.Spec.RunnerGroup, "create", "conflict",
+		).Inc()
+		metrics.SessionConflicts.WithLabelValues(
+			runnerSet.Namespace, autoscaleSet.Name, runnerSet.Spec.RunnerGroup, hostname,
+		).Inc()
+		if r.ListenerManager.HasListener(listenerKey) {
+			logger.Info("Session already exists but listener is running, continuing", "error", err)
+			res, _ := r.updateStatus(ctx, runnerSet, logger)
+			return nil, &res, nil
+		}
+		logger.Info("Session conflict detected - previous session still active. Waiting for it to expire before retrying",
+			"hostname", hostname, "error", err)
+		return nil, &ctrl.Result{RequeueAfter: constants.SessionConflictRequeueAfter}, nil
+	}
+	metrics.SessionOperations.WithLabelValues(
+		runnerSet.Namespace, autoscaleSet.Name, runnerSet.Spec.RunnerGroup, "create", "error",
+	).Inc()
+	res, updateErr := r.updateStatusError(ctx, runnerSet, "SessionCreationFailed",
+		fmt.Sprintf("Failed to create message session: %v", err), logger)
+	return nil, &res, updateErr
+}
 
-	return r.ClientFactory.CreateClient(ctx, config)
+func (r *RunnerSetReconciler) setRunnerSetListenerAnnotations(
+	ctx context.Context,
+	runnerSet *scalesetv1alpha1.RunnerSet,
+	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
+) error {
+	if err := r.Get(ctx, types.NamespacedName{Namespace: runnerSet.Namespace, Name: runnerSet.Name}, runnerSet); err != nil {
+		return err
+	}
+	if runnerSet.Annotations == nil {
+		runnerSet.Annotations = make(map[string]string)
+	}
+	runnerSet.Annotations[constants.AnnotationPodSpecHash] = r.computePodSpecHash(
+		autoscaleSet.Spec.RunnerImage, runnerSet.Spec.RunnerTemplate, autoscaleSet.Spec.RunnerTemplate,
+	)
+	runnerSet.Annotations[constants.AnnotationLastAutoscaleSetGeneration] = fmt.Sprintf("%d", autoscaleSet.Generation)
+	return r.Update(ctx, runnerSet)
 }
 
 func (r *RunnerSetReconciler) updateStatus(
@@ -487,9 +346,9 @@ func (r *RunnerSetReconciler) updateStatus(
 	}
 
 	for _, pod := range pods {
-		if pod.Labels[scaler.LabelRunnerState] == scaler.RunnerStateIdle {
+		if pod.Labels[constants.LabelRunnerState] == constants.RunnerStateIdle {
 			idleCount++
-		} else if pod.Labels[scaler.LabelRunnerState] == scaler.RunnerStateBusy {
+		} else if pod.Labels[constants.LabelRunnerState] == constants.RunnerStateBusy {
 			busyCount++
 		}
 
@@ -501,7 +360,7 @@ func (r *RunnerSetReconciler) updateStatus(
 
 		if !pod.CreationTimestamp.IsZero() {
 			age := now.Sub(pod.CreationTimestamp.Time).Seconds()
-			state := pod.Labels[scaler.LabelRunnerState]
+			state := pod.Labels[constants.LabelRunnerState]
 			if state == "" {
 				state = "unknown"
 			}
@@ -591,9 +450,9 @@ func (r *RunnerSetReconciler) updateStatus(
 			runnerSet.Status.Conditions,
 			"Ready",
 		) {
-		return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
+		return ctrl.Result{RequeueAfter: constants.RequeueActiveInterval}, nil
 	}
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: constants.RequeueScaleSetIDWait}, nil
 }
 
 func (r *RunnerSetReconciler) getRunnerPods(
@@ -601,15 +460,14 @@ func (r *RunnerSetReconciler) getRunnerPods(
 	runnerSet *scalesetv1alpha1.RunnerSet,
 ) ([]corev1.Pod, error) {
 	podList := &corev1.PodList{}
-	selector := labels.SelectorFromSet(labels.Set{
-		scaler.LabelRunnerGroup: runnerSet.Spec.RunnerGroup,
-	})
 
 	if err := r.List(
 		ctx,
 		podList,
 		k8sclient.InNamespace(runnerSet.Namespace),
-		k8sclient.MatchingLabelsSelector{Selector: selector},
+		k8sclient.MatchingFields{
+			"metadata.labels." + constants.LabelRunnerGroup: runnerSet.Spec.RunnerGroup,
+		},
 	); err != nil {
 		return nil, err
 	}
@@ -623,23 +481,19 @@ func (r *RunnerSetReconciler) updateStatusError(
 	reason, message string,
 	logger logr.Logger,
 ) (ctrl.Result, error) {
-	if err := r.Get(ctx, types.NamespacedName{
-		Namespace: runnerSet.Namespace,
-		Name:      runnerSet.Name,
-	}, runnerSet); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	meta.SetStatusCondition(&runnerSet.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: runnerSet.Generation,
-	})
-
-	if err := r.Status().Update(ctx, runnerSet); err != nil {
-		if k8serrors.IsConflict(err) {
+	key := types.NamespacedName{Namespace: runnerSet.Namespace, Name: runnerSet.Name}
+	obj := &scalesetv1alpha1.RunnerSet{}
+	err := RefetchAndUpdateStatus(ctx, r.Client, key, obj, func() {
+		meta.SetStatusCondition(&obj.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: obj.Generation,
+		})
+	}, func(ctx context.Context, o k8sclient.Object) error { return r.Status().Update(ctx, o) })
+	if err != nil {
+		if errors.Is(err, ErrStatusConflict) {
 			return ctrl.Result{Requeue: true}, nil
 		}
 		return ctrl.Result{}, err
@@ -654,7 +508,7 @@ func (r *RunnerSetReconciler) updateStatusError(
 		message,
 	)
 
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	return ctrl.Result{RequeueAfter: constants.RequeueErrorInterval}, nil
 }
 
 func (r *RunnerSetReconciler) handleDeletion(
@@ -662,7 +516,7 @@ func (r *RunnerSetReconciler) handleDeletion(
 	runnerSet *scalesetv1alpha1.RunnerSet,
 	logger logr.Logger,
 ) (ctrl.Result, error) {
-	if !controllerutil.ContainsFinalizer(runnerSet, RunnerSetFinalizerName) {
+	if !controllerutil.ContainsFinalizer(runnerSet, constants.RunnerSetFinalizerName) {
 		return ctrl.Result{}, nil
 	}
 
@@ -692,7 +546,7 @@ func (r *RunnerSetReconciler) handleDeletion(
 		}
 	}
 
-	controllerutil.RemoveFinalizer(runnerSet, RunnerSetFinalizerName)
+	controllerutil.RemoveFinalizer(runnerSet, constants.RunnerSetFinalizerName)
 	if err := r.Update(ctx, runnerSet); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -764,136 +618,77 @@ func (r *RunnerSetReconciler) mergeRunnerTemplates(
 		return r.copyTemplateWithCleanMetadata(baseTemplate)
 	}
 
-	merged := &scalesetv1alpha1.RunnerPodTemplate{
-		Spec: scalesetv1alpha1.RunnerPodSpec{},
-	}
-
-	hasLabels := (baseTemplate.Metadata.Labels != nil && len(baseTemplate.Metadata.Labels) > 0) ||
-		(overrideTemplate.Metadata.Labels != nil && len(overrideTemplate.Metadata.Labels) > 0)
-	hasAnnotations := (baseTemplate.Metadata.Annotations != nil && len(baseTemplate.Metadata.Annotations) > 0) ||
-		(overrideTemplate.Metadata.Annotations != nil && len(overrideTemplate.Metadata.Annotations) > 0)
-
-	if hasLabels {
-		merged.Metadata.Labels = make(map[string]string)
-		if baseTemplate.Metadata.Labels != nil {
-			for k, v := range baseTemplate.Metadata.Labels {
-				merged.Metadata.Labels[k] = v
-			}
-		}
-		if overrideTemplate.Metadata.Labels != nil {
-			for k, v := range overrideTemplate.Metadata.Labels {
-				merged.Metadata.Labels[k] = v
-			}
-		}
-	}
-
-	if hasAnnotations {
-		merged.Metadata.Annotations = make(map[string]string)
-		if baseTemplate.Metadata.Annotations != nil {
-			for k, v := range baseTemplate.Metadata.Annotations {
-				merged.Metadata.Annotations[k] = v
-			}
-		}
-		if overrideTemplate.Metadata.Annotations != nil {
-			for k, v := range overrideTemplate.Metadata.Annotations {
-				merged.Metadata.Annotations[k] = v
-			}
-		}
-	}
-
-	if baseTemplate.Spec.NodeSelector != nil || overrideTemplate.Spec.NodeSelector != nil {
-		merged.Spec.NodeSelector = make(map[string]string)
-		if baseTemplate.Spec.NodeSelector != nil {
-			for k, v := range baseTemplate.Spec.NodeSelector {
-				merged.Spec.NodeSelector[k] = v
-			}
-		}
-		if overrideTemplate.Spec.NodeSelector != nil {
-			for k, v := range overrideTemplate.Spec.NodeSelector {
-				merged.Spec.NodeSelector[k] = v
-			}
-		}
-		if len(merged.Spec.NodeSelector) == 0 {
-			merged.Spec.NodeSelector = nil
-		}
-	}
-
-	if baseTemplate.Spec.Resources.Limits != nil || overrideTemplate.Spec.Resources.Limits != nil {
-		merged.Spec.Resources.Limits = make(map[string]string)
-		if baseTemplate.Spec.Resources.Limits != nil {
-			for k, v := range baseTemplate.Spec.Resources.Limits {
-				merged.Spec.Resources.Limits[k] = v
-			}
-		}
-		if overrideTemplate.Spec.Resources.Limits != nil {
-			for k, v := range overrideTemplate.Spec.Resources.Limits {
-				merged.Spec.Resources.Limits[k] = v
-			}
-		}
-		if len(merged.Spec.Resources.Limits) == 0 {
-			merged.Spec.Resources.Limits = nil
-		}
-	}
-
-	if baseTemplate.Spec.Resources.Requests != nil || overrideTemplate.Spec.Resources.Requests != nil {
-		merged.Spec.Resources.Requests = make(map[string]string)
-		if baseTemplate.Spec.Resources.Requests != nil {
-			for k, v := range baseTemplate.Spec.Resources.Requests {
-				merged.Spec.Resources.Requests[k] = v
-			}
-		}
-		if overrideTemplate.Spec.Resources.Requests != nil {
-			for k, v := range overrideTemplate.Spec.Resources.Requests {
-				merged.Spec.Resources.Requests[k] = v
-			}
-		}
-		if len(merged.Spec.Resources.Requests) == 0 {
-			merged.Spec.Resources.Requests = nil
-		}
-	}
-
-	envMap := make(map[string]string)
-	if baseTemplate.Spec.Env != nil {
-		for _, env := range baseTemplate.Spec.Env {
-			envMap[env.Name] = env.Value
-		}
-	}
-	if overrideTemplate.Spec.Env != nil {
-		for _, env := range overrideTemplate.Spec.Env {
-			envMap[env.Name] = env.Value
-		}
-	}
-	if len(envMap) > 0 {
-		merged.Spec.Env = make([]scalesetv1alpha1.EnvVar, 0, len(envMap))
-		for name, value := range envMap {
-			merged.Spec.Env = append(merged.Spec.Env, scalesetv1alpha1.EnvVar{
-				Name:  name,
-				Value: value,
-			})
-		}
-	}
-
-	tolerationMap := make(map[string]scalesetv1alpha1.Toleration)
-	if baseTemplate.Spec.Tolerations != nil {
-		for _, tol := range baseTemplate.Spec.Tolerations {
-			key := fmt.Sprintf("%s:%s:%s:%s", tol.Key, tol.Operator, tol.Value, tol.Effect)
-			tolerationMap[key] = tol
-		}
-	}
-	if overrideTemplate.Spec.Tolerations != nil {
-		for _, tol := range overrideTemplate.Spec.Tolerations {
-			key := fmt.Sprintf("%s:%s:%s:%s", tol.Key, tol.Operator, tol.Value, tol.Effect)
-			tolerationMap[key] = tol
-		}
-	}
-	if len(tolerationMap) > 0 {
-		merged.Spec.Tolerations = make([]scalesetv1alpha1.Toleration, 0, len(tolerationMap))
-		for _, tol := range tolerationMap {
-			merged.Spec.Tolerations = append(merged.Spec.Tolerations, tol)
-		}
-	}
-
+	merged := &scalesetv1alpha1.RunnerPodTemplate{Spec: scalesetv1alpha1.RunnerPodSpec{}}
+	mergeTemplateMetadata(merged, baseTemplate, overrideTemplate)
+	merged.Spec.NodeSelector = mergeStringMaps(baseTemplate.Spec.NodeSelector, overrideTemplate.Spec.NodeSelector)
+	merged.Spec.Resources.Limits = mergeStringMaps(baseTemplate.Spec.Resources.Limits, overrideTemplate.Spec.Resources.Limits)
+	merged.Spec.Resources.Requests = mergeStringMaps(baseTemplate.Spec.Resources.Requests, overrideTemplate.Spec.Resources.Requests)
+	merged.Spec.Env = mergeEnvVars(baseTemplate.Spec.Env, overrideTemplate.Spec.Env)
+	merged.Spec.Tolerations = mergeTolerations(baseTemplate.Spec.Tolerations, overrideTemplate.Spec.Tolerations)
 	return merged
+}
+
+func mergeTemplateMetadata(
+	merged *scalesetv1alpha1.RunnerPodTemplate,
+	base, override *scalesetv1alpha1.RunnerPodTemplate,
+) {
+	merged.Metadata.Labels = mergeStringMaps(base.Metadata.Labels, override.Metadata.Labels)
+	merged.Metadata.Annotations = mergeStringMaps(base.Metadata.Annotations, override.Metadata.Annotations)
+}
+
+func mergeStringMaps(base, override map[string]string) map[string]string {
+	if base == nil && override == nil {
+		return nil
+	}
+	out := make(map[string]string)
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range override {
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func mergeEnvVars(base, override []scalesetv1alpha1.EnvVar) []scalesetv1alpha1.EnvVar {
+	envMap := make(map[string]string)
+	for _, env := range base {
+		envMap[env.Name] = env.Value
+	}
+	for _, env := range override {
+		envMap[env.Name] = env.Value
+	}
+	if len(envMap) == 0 {
+		return nil
+	}
+	out := make([]scalesetv1alpha1.EnvVar, 0, len(envMap))
+	for name, value := range envMap {
+		out = append(out, scalesetv1alpha1.EnvVar{Name: name, Value: value})
+	}
+	return out
+}
+
+func mergeTolerations(base, override []scalesetv1alpha1.Toleration) []scalesetv1alpha1.Toleration {
+	tolerationMap := make(map[string]scalesetv1alpha1.Toleration)
+	for _, tol := range base {
+		key := fmt.Sprintf("%s:%s:%s:%s", tol.Key, tol.Operator, tol.Value, tol.Effect)
+		tolerationMap[key] = tol
+	}
+	for _, tol := range override {
+		key := fmt.Sprintf("%s:%s:%s:%s", tol.Key, tol.Operator, tol.Value, tol.Effect)
+		tolerationMap[key] = tol
+	}
+	if len(tolerationMap) == 0 {
+		return nil
+	}
+	out := make([]scalesetv1alpha1.Toleration, 0, len(tolerationMap))
+	for _, tol := range tolerationMap {
+		out = append(out, tol)
+	}
+	return out
 }
 
 func (r *RunnerSetReconciler) copyTemplateWithCleanMetadata(
@@ -960,7 +755,7 @@ func (r *RunnerSetReconciler) rolloutRunnerPods(
 	deletedCount := 0
 	for _, pod := range pods {
 		// Only delete idle pods to avoid disrupting running jobs
-		if pod.Labels[scaler.LabelRunnerState] == scaler.RunnerStateIdle {
+		if pod.Labels[constants.LabelRunnerState] == constants.RunnerStateIdle {
 			logger.Info(
 				"Deleting idle pod for rollout",
 				"podName", pod.Name,

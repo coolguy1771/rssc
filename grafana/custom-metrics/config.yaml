@@ -82,13 +82,6 @@ customMetrics:
   - metric: scaleset_github_api_call_errors_total
     type: counter
     unit: none
-  - metric: scaleset_job_repository_total
-    type: counter
-    unit: none
-  - metric: scaleset_job_workflow_total
-    type: counter
-    unit: none
-
   # Histogram metrics
   - metric: scaleset_reconciliation_duration_seconds
     type: histogram

@@ -224,13 +224,15 @@ type AutoscaleSetStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:resource:categories=github;scaleset,shortName=asss
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
-// +kubebuilder:printcolumn:name="ScaleSetID",type="integer",JSONPath=".status.scaleSetID"
-// +kubebuilder:printcolumn:name="Current",type="integer",JSONPath=".status.currentRunners"
-// +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".status.desiredRunners"
-// +kubebuilder:printcolumn:name="Labels",type="string",JSONPath=".status.labels[*].name",priority=1
+// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase (Pending, Active, Error)"
+// +kubebuilder:printcolumn:name="ScaleSetID",type="integer",JSONPath=".status.scaleSetID",description="GitHub scale set ID"
+// +kubebuilder:printcolumn:name="Current",type="integer",JSONPath=".status.currentRunners",description="Current number of runners"
+// +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".status.desiredRunners",description="Desired/queued job count"
+// +kubebuilder:printcolumn:name="Labels",type="string",JSONPath=".status.labels[*].name",priority=1,description="Scale set labels"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:selectablefield:JSONPath=".status.phase"
 
 // AutoscaleSet is the Schema for the autoscalesets API
 type AutoscaleSet struct {

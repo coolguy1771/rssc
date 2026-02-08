@@ -3,28 +3,37 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.20.0
+    controller-gen.kubebuilder.io/version: v0.18.0
   name: runnersets.scaleset.actions.github.com
 spec:
   group: scaleset.actions.github.com
   names:
+    categories:
+    - github
+    - scaleset
     kind: RunnerSet
     listKind: RunnerSetList
     plural: runnersets
+    shortNames:
+    - rns
     singular: runnerset
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.runnerGroup
+    - description: Runner group name
+      jsonPath: .spec.runnerGroup
       name: RunnerGroup
       type: string
-    - jsonPath: .status.runnerCount
+    - description: Total runner pods
+      jsonPath: .status.runnerCount
       name: Total
       type: integer
-    - jsonPath: .status.idleRunners
+    - description: Idle runners
+      jsonPath: .status.idleRunners
       name: Idle
       type: integer
-    - jsonPath: .status.busyRunners
+    - description: Busy runners
+      jsonPath: .status.busyRunners
       name: Busy
       type: integer
     - jsonPath: .metadata.creationTimestamp
@@ -235,6 +244,8 @@ spec:
                 type: integer
             type: object
         type: object
+    selectableFields:
+    - jsonPath: .spec.runnerGroup
     served: true
     storage: true
     subresources:

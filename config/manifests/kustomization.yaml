@@ -1,0 +1,8 @@
+# These resources constitute the fully configured set of manifests
+# used to generate the 'bundle/' directory. bases/scaleset-controller.clusterserviceversion.yaml
+# is created by: operator-sdk generate kustomize manifests -q
+resources:
+- bases/scaleset-controller.clusterserviceversion.yaml
+- ../default
+- ../samples
+- ../scorecard

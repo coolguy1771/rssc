@@ -51,7 +51,14 @@ var _ = Describe("AutoscaleSet Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: scalesetv1alpha1.AutoscaleSetSpec{
+						GitHubConfigURL: "https://github.com/test-org/test-repo",
+						ScaleSetName:    "test-scale-set",
+						RunnerImage:     "ghcr.io/actions/runner:latest",
+						PersonalAccessToken: &scalesetv1alpha1.PersonalAccessTokenAuth{
+							TokenSecretRef: scalesetv1alpha1.SecretRef{Name: "test-token-secret"},
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

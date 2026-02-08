@@ -66,12 +66,14 @@ type RunnerSetStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:resource:categories=github;scaleset,shortName=rns
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="RunnerGroup",type="string",JSONPath=".spec.runnerGroup"
-// +kubebuilder:printcolumn:name="Total",type="integer",JSONPath=".status.runnerCount"
-// +kubebuilder:printcolumn:name="Idle",type="integer",JSONPath=".status.idleRunners"
-// +kubebuilder:printcolumn:name="Busy",type="integer",JSONPath=".status.busyRunners"
+// +kubebuilder:printcolumn:name="RunnerGroup",type="string",JSONPath=".spec.runnerGroup",description="Runner group name"
+// +kubebuilder:printcolumn:name="Total",type="integer",JSONPath=".status.runnerCount",description="Total runner pods"
+// +kubebuilder:printcolumn:name="Idle",type="integer",JSONPath=".status.idleRunners",description="Idle runners"
+// +kubebuilder:printcolumn:name="Busy",type="integer",JSONPath=".status.busyRunners",description="Busy runners"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:selectablefield:JSONPath=".spec.runnerGroup"
 
 // RunnerSet is the Schema for the runnersets API
 type RunnerSet struct {

@@ -1,0 +1,46 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: '[]'
+    capabilities: Basic Install
+  name: scaleset-controller.v0.0.0
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: AutoscaleSet is the Schema for the autoscalesets API
+      displayName: Autoscale Set
+      kind: AutoscaleSet
+      name: autoscalesets.scaleset.actions.github.com
+      version: v1alpha1
+    - description: RunnerSet is the Schema for the runnersets API
+      displayName: Runner Set
+      kind: RunnerSet
+      name: runnersets.scaleset.actions.github.com
+      version: v1alpha1
+  description: RSSC (RunnerSet Scale Controller) manages GitHub Actions self-hosted
+    runner scale sets.
+  displayName: Scaleset Controller
+  install:
+    spec:
+      deployments: null
+      strategy: ""
+  installModes:
+  - supported: false
+    type: OwnNamespace
+  - supported: false
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - github-actions
+  - runners
+  - scaleset
+  maturity: alpha
+  minKubeVersion: 1.28.0
+  provider: {}
+  version: 0.0.0

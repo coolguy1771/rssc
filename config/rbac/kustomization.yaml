@@ -1,0 +1,10 @@
+resources:
+- role.yaml
+- role_binding.yaml
+- service_account.yaml
+- autoscaleset_admin_role.yaml
+- autoscaleset_editor_role.yaml
+- autoscaleset_viewer_role.yaml
+- runnerset_admin_role.yaml
+- runnerset_editor_role.yaml
+- runnerset_viewer_role.yaml

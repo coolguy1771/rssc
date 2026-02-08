@@ -263,22 +263,6 @@ var (
 		[]string{"namespace", "autoscaleset", "operation", "status_code", "error_type"},
 	)
 
-	JobRepository = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "scaleset_job_repository_total",
-			Help: "Total number of jobs by repository",
-		},
-		[]string{"namespace", "autoscaleset", "runner_group", "repository", "event"},
-	)
-
-	JobWorkflow = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "scaleset_job_workflow_total",
-			Help: "Total number of jobs by workflow",
-		},
-		[]string{"namespace", "autoscaleset", "runner_group", "repository", "workflow", "event"},
-	)
-
 	ReconciliationQueueDepth = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "scaleset_reconciliation_queue_depth",
@@ -353,8 +337,6 @@ func init() {
 		ScalingConstraints,
 		GitHubAPICallDuration,
 		GitHubAPICallErrors,
-		JobRepository,
-		JobWorkflow,
 		ReconciliationQueueDepth,
 		ReconciliationRate,
 		CacheHits,

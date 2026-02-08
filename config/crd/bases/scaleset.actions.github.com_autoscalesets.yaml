@@ -3,31 +3,41 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.20.0
+    controller-gen.kubebuilder.io/version: v0.18.0
   name: autoscalesets.scaleset.actions.github.com
 spec:
   group: scaleset.actions.github.com
   names:
+    categories:
+    - github
+    - scaleset
     kind: AutoscaleSet
     listKind: AutoscaleSetList
     plural: autoscalesets
+    shortNames:
+    - asss
     singular: autoscaleset
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.phase
+    - description: Current phase (Pending, Active, Error)
+      jsonPath: .status.phase
       name: Phase
       type: string
-    - jsonPath: .status.scaleSetID
+    - description: GitHub scale set ID
+      jsonPath: .status.scaleSetID
       name: ScaleSetID
       type: integer
-    - jsonPath: .status.currentRunners
+    - description: Current number of runners
+      jsonPath: .status.currentRunners
       name: Current
       type: integer
-    - jsonPath: .status.desiredRunners
+    - description: Desired/queued job count
+      jsonPath: .status.desiredRunners
       name: Desired
       type: integer
-    - jsonPath: .status.labels[*].name
+    - description: Scale set labels
+      jsonPath: .status.labels[*].name
       name: Labels
       priority: 1
       type: string
@@ -343,6 +353,8 @@ spec:
                 type: integer
             type: object
         type: object
+    selectableFields:
+    - jsonPath: .status.phase
     served: true
     storage: true
     subresources:

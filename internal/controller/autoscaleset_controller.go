@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -25,10 +26,12 @@ import (
 	"github.com/actions/scaleset"
 	scalesetv1alpha1 "github.com/coolguy1771/rssc/api/v1alpha1"
 	"github.com/coolguy1771/rssc/internal/client"
+	"github.com/coolguy1771/rssc/internal/constants"
+	rsscerrors "github.com/coolguy1771/rssc/internal/errors"
 	"github.com/coolguy1771/rssc/internal/metrics"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -43,10 +46,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-)
-
-const (
-	FinalizerName = "scaleset.actions.github.com/finalizer"
 )
 
 // AutoscaleSetReconciler reconciles a AutoscaleSet object
@@ -71,18 +70,12 @@ func (r *AutoscaleSetReconciler) Reconcile(
 ) (ctrl.Result, error) {
 	startTime := time.Now()
 	logger := log.FromContext(ctx)
-	defer func() {
-		duration := time.Since(startTime).Seconds()
-		metrics.ReconciliationDuration.WithLabelValues(
-			"autoscaleset",
-			req.Namespace,
-			req.Name,
-		).Observe(duration)
-	}()
+	logger.Info("Reconciling AutoscaleSet", "namespace", req.Namespace, "name", req.Name)
+	defer r.recordReconcileDuration("autoscaleset", req.Namespace, req.Name, startTime)
 
 	autoscaleSet := &scalesetv1alpha1.AutoscaleSet{}
 	if err := r.Get(ctx, req.NamespacedName, autoscaleSet); err != nil {
-		if errors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			metrics.ReconciliationRate.WithLabelValues("autoscaleset", "not_found").Inc()
 			return ctrl.Result{}, nil
 		}
@@ -94,122 +87,53 @@ func (r *AutoscaleSetReconciler) Reconcile(
 		return r.handleDeletion(ctx, autoscaleSet, logger)
 	}
 
-	if !controllerutil.ContainsFinalizer(autoscaleSet, FinalizerName) {
-		controllerutil.AddFinalizer(autoscaleSet, FinalizerName)
-		if err := r.Update(ctx, autoscaleSet); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+	res, err, done := r.ensureFinalizer(ctx, autoscaleSet)
+	if done {
+		return res, err
 	}
 
-	scalesetClient, err := r.getScalesetClient(ctx, autoscaleSet)
+	return r.reconcileActive(ctx, autoscaleSet, logger)
+}
+
+func (r *AutoscaleSetReconciler) recordReconcileDuration(kind, namespace, name string, startTime time.Time) {
+	metrics.ReconciliationDuration.WithLabelValues(kind, namespace, name).Observe(time.Since(startTime).Seconds())
+}
+
+func (r *AutoscaleSetReconciler) ensureFinalizer(
+	ctx context.Context,
+	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
+) (ctrl.Result, error, bool) {
+	if controllerutil.ContainsFinalizer(autoscaleSet, constants.FinalizerName) {
+		return ctrl.Result{}, nil, false
+	}
+	controllerutil.AddFinalizer(autoscaleSet, constants.FinalizerName)
+	if err := r.Update(ctx, autoscaleSet); err != nil {
+		return ctrl.Result{}, err, true
+	}
+	return ctrl.Result{}, nil, true
+}
+
+func (r *AutoscaleSetReconciler) reconcileActive(
+	ctx context.Context,
+	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
+	logger logr.Logger,
+) (ctrl.Result, error) {
+	scalesetClient, err := r.ClientFactory.CreateClientForAutoscaleSet(ctx, autoscaleSet, client.SubsystemController)
 	if err != nil {
-		return r.updateStatusError(
-			ctx,
-			autoscaleSet,
-			"ClientCreationFailed",
-			fmt.Sprintf("Failed to create scaleset client: %v", err),
-			logger,
-		)
+		return r.updateStatusError(ctx, autoscaleSet, "ClientCreationFailed",
+			fmt.Sprintf("Failed to create scaleset client: %v", err), logger)
 	}
 
-	runnerGroupID, err := r.getRunnerGroupID(
-		ctx,
-		scalesetClient,
-		autoscaleSet.Spec.RunnerGroup,
-	)
+	runnerGroupID, err := r.getRunnerGroupID(ctx, scalesetClient, autoscaleSet.Spec.RunnerGroup)
 	if err != nil {
-		return r.updateStatusError(
-			ctx,
-			autoscaleSet,
-			"RunnerGroupNotFound",
-			fmt.Sprintf("Failed to get runner group: %v", err),
-			logger,
-		)
+		return r.updateStatusError(ctx, autoscaleSet, "RunnerGroupNotFound",
+			fmt.Sprintf("Failed to get runner group: %v", err), logger)
 	}
 
 	if autoscaleSet.Status.ScaleSetID == nil {
-		return r.createScaleSet(
-			ctx,
-			autoscaleSet,
-			scalesetClient,
-			runnerGroupID,
-			logger,
-		)
+		return r.createScaleSet(ctx, autoscaleSet, scalesetClient, runnerGroupID, logger)
 	}
-
-	return r.updateScaleSet(
-		ctx,
-		autoscaleSet,
-		scalesetClient,
-		logger,
-	)
-}
-
-func (r *AutoscaleSetReconciler) getScalesetClient(
-	ctx context.Context,
-	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
-) (*scaleset.Client, error) {
-	config := client.ClientConfig{
-		GitHubConfigURL: autoscaleSet.Spec.GitHubConfigURL,
-		SystemInfo: scaleset.SystemInfo{
-			System:    "actions-runner-controller",
-			Version:   "v1alpha1",
-			CommitSHA: "unknown",
-			Subsystem: "controller",
-		},
-	}
-
-	if autoscaleSet.Spec.GitHubApp != nil {
-		appConfig, err := r.ClientFactory.LoadGitHubAppFromSecret(
-			ctx,
-			autoscaleSet.Namespace,
-			types.NamespacedName{
-				Namespace: autoscaleSet.Spec.GitHubApp.PrivateKeySecretRef.Namespace,
-				Name:      autoscaleSet.Spec.GitHubApp.PrivateKeySecretRef.Name,
-			},
-			autoscaleSet.Spec.GitHubApp.ClientID,
-			autoscaleSet.Spec.GitHubApp.InstallationID,
-		)
-		if err != nil {
-			return nil, err
-		}
-		config.GitHubApp = appConfig
-	} else if autoscaleSet.Spec.PersonalAccessToken != nil {
-		patConfig, err := r.ClientFactory.LoadPATFromSecret(
-			ctx,
-			autoscaleSet.Namespace,
-			types.NamespacedName{
-				Namespace: autoscaleSet.Spec.PersonalAccessToken.TokenSecretRef.Namespace,
-				Name:      autoscaleSet.Spec.PersonalAccessToken.TokenSecretRef.Name,
-			},
-		)
-		if err != nil {
-			return nil, err
-		}
-		config.PAT = patConfig
-	} else {
-		return nil, fmt.Errorf(
-			"either GitHubApp or PersonalAccessToken must be specified",
-		)
-	}
-
-	scalesetClient, err := r.ClientFactory.CreateClient(ctx, config)
-	if err != nil {
-		return nil, err
-	}
-
-	if autoscaleSet.Status.ScaleSetID != nil {
-		scalesetClient.SetSystemInfo(scaleset.SystemInfo{
-			System:     "actions-runner-controller",
-			Version:    "v1alpha1",
-			CommitSHA:  "unknown",
-			ScaleSetID: *autoscaleSet.Status.ScaleSetID,
-			Subsystem:  "controller",
-		})
-	}
-
-	return scalesetClient, nil
+	return r.updateScaleSet(ctx, autoscaleSet, scalesetClient, logger)
 }
 
 func (r *AutoscaleSetReconciler) getRunnerGroupID(
@@ -240,52 +164,21 @@ func (r *AutoscaleSetReconciler) createScaleSet(
 	logger logr.Logger,
 ) (ctrl.Result, error) {
 	labels := r.buildLabels(autoscaleSet)
-
-	logger.Info(
-		"Creating scale set with labels",
+	logger.Info("Creating scale set with labels",
 		"scaleSetName", autoscaleSet.Spec.ScaleSetName,
 		"labels", formatLabelsForLog(labels),
 	)
 
-	scaleSet := &scaleset.RunnerScaleSet{
-		Name:          autoscaleSet.Spec.ScaleSetName,
-		RunnerGroupID: runnerGroupID,
-		Labels:        labels,
-		RunnerSetting: scaleset.RunnerSetting{
-			DisableUpdate: true,
-		},
-	}
-
-	var created *scaleset.RunnerScaleSet
-	err := client.RetryWithBackoff(ctx, client.DefaultRetryConfig, func() error {
-		var retryErr error
-		created, retryErr = scalesetClient.CreateRunnerScaleSet(ctx, scaleSet)
-		if retryErr == nil && created != nil {
-			logger.Info(
-				"Scale set created by GitHub",
-				"scaleSetID", created.ID,
-				"labels", formatLabelsForLog(created.Labels),
-			)
-		}
-		return retryErr
-	})
-
+	created, err := r.createScaleSetInGitHub(ctx, autoscaleSet, scalesetClient, runnerGroupID, labels, logger)
 	if err != nil {
 		errorMsg := fmt.Sprintf("Failed to create scale set: %v", err)
-		if strings.Contains(err.Error(), "StatusCode 404") &&
-			strings.Contains(err.Error(), "registration-token") {
+		if rsscerrors.IsScaleSetRegistrationUnsupported(err) {
 			errorMsg = fmt.Sprintf(
 				"Failed to create scale set: %v. Note: Runner scale sets are only supported for GitHub organizations and enterprises, not personal user accounts. Please ensure your githubConfigURL points to an organization.",
 				err,
 			)
 		}
-		return r.updateStatusError(
-			ctx,
-			autoscaleSet,
-			"ScaleSetCreationFailed",
-			errorMsg,
-			logger,
-		)
+		return r.updateStatusError(ctx, autoscaleSet, "ScaleSetCreationFailed", errorMsg, logger)
 	}
 
 	if err := r.Get(ctx, types.NamespacedName{
@@ -295,58 +188,70 @@ func (r *AutoscaleSetReconciler) createScaleSet(
 		return ctrl.Result{}, err
 	}
 
-	autoscaleSet.Status.ScaleSetID = &created.ID
-	autoscaleSet.Status.Phase = "Active"
-	if created.Labels != nil {
-		autoscaleSet.Status.Labels = make([]scalesetv1alpha1.ScaleSetLabel, len(created.Labels))
-		for i, label := range created.Labels {
-			autoscaleSet.Status.Labels[i] = scalesetv1alpha1.ScaleSetLabel{
-				Type: label.Type,
-				Name: label.Name,
-			}
-		}
-	}
-	meta.SetStatusCondition(&autoscaleSet.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		Reason:             "ScaleSetCreated",
-		Message:            "Scale set created successfully",
-		ObservedGeneration: autoscaleSet.Generation,
-	})
-
+	r.setCreateScaleSetStatus(autoscaleSet, created)
 	if err := r.Status().Update(ctx, autoscaleSet); err != nil {
-		if errors.IsConflict(err) {
+		if k8serrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
 	metrics.ScaleSetOperations.WithLabelValues(
-		autoscaleSet.Namespace,
-		autoscaleSet.Name,
-		"create",
-		"success",
+		autoscaleSet.Namespace, autoscaleSet.Name, "create", "success",
 	).Inc()
-
-	metrics.AutoscaleSetTotal.WithLabelValues(
-		autoscaleSet.Namespace,
-		autoscaleSet.Status.Phase,
-	).Set(1)
-
-	logger.Info(
-		"Created scale set",
-		"scaleSetID", created.ID,
-		"labels", formatLabelsForLog(created.Labels),
-	)
-
-	r.Recorder.Event(
-		autoscaleSet,
-		corev1.EventTypeNormal,
-		"ScaleSetCreated",
+	metrics.AutoscaleSetTotal.WithLabelValues(autoscaleSet.Namespace, autoscaleSet.Status.Phase).Set(1)
+	logger.Info("Created scale set", "scaleSetID", created.ID, "labels", formatLabelsForLog(created.Labels))
+	r.Recorder.Event(autoscaleSet, corev1.EventTypeNormal, "ScaleSetCreated",
 		fmt.Sprintf("Successfully created scale set %s with ID %d", autoscaleSet.Spec.ScaleSetName, created.ID),
 	)
-
 	return ctrl.Result{}, nil
+}
+
+func (r *AutoscaleSetReconciler) createScaleSetInGitHub(
+	ctx context.Context,
+	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
+	scalesetClient *scaleset.Client,
+	runnerGroupID int,
+	labels []scaleset.Label,
+	logger logr.Logger,
+) (*scaleset.RunnerScaleSet, error) {
+	scaleSet := &scaleset.RunnerScaleSet{
+		Name:          autoscaleSet.Spec.ScaleSetName,
+		RunnerGroupID: runnerGroupID,
+		Labels:        labels,
+		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+	}
+	var created *scaleset.RunnerScaleSet
+	err := client.RetryWithBackoff(ctx, client.DefaultRetryConfig, func() error {
+		var retryErr error
+		created, retryErr = scalesetClient.CreateRunnerScaleSet(ctx, scaleSet)
+		if retryErr == nil && created != nil {
+			logger.Info("Scale set created by GitHub", "scaleSetID", created.ID, "labels", formatLabelsForLog(created.Labels))
+		}
+		return retryErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func (r *AutoscaleSetReconciler) setCreateScaleSetStatus(
+	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
+	created *scaleset.RunnerScaleSet,
+) {
+	autoscaleSet.Status.ScaleSetID = &created.ID
+	autoscaleSet.Status.Phase = "Active"
+	if created.Labels != nil {
+		autoscaleSet.Status.Labels = make([]scalesetv1alpha1.ScaleSetLabel, len(created.Labels))
+		for i, label := range created.Labels {
+			autoscaleSet.Status.Labels[i] = scalesetv1alpha1.ScaleSetLabel{Type: label.Type, Name: label.Name}
+		}
+	}
+	meta.SetStatusCondition(&autoscaleSet.Status.Conditions, metav1.Condition{
+		Type: "Ready", Status: metav1.ConditionTrue, Reason: "ScaleSetCreated",
+		Message: "Scale set created successfully", ObservedGeneration: autoscaleSet.Generation,
+	})
 }
 
 func (r *AutoscaleSetReconciler) updateScaleSet(
@@ -355,31 +260,10 @@ func (r *AutoscaleSetReconciler) updateScaleSet(
 	scalesetClient *scaleset.Client,
 	logger logr.Logger,
 ) (ctrl.Result, error) {
-	scaleSet, err := r.ClientFactory.GetCachedScaleSet(
-		*autoscaleSet.Status.ScaleSetID,
-		func() (*scaleset.RunnerScaleSet, error) {
-			ss, getErr := scalesetClient.GetRunnerScaleSetByID(
-				ctx,
-				*autoscaleSet.Status.ScaleSetID,
-			)
-			if getErr == nil && ss != nil {
-				logger.V(1).Info(
-					"Retrieved scale set from GitHub",
-					"scaleSetID", ss.ID,
-					"labels", formatLabelsForLog(ss.Labels),
-				)
-			}
-			return ss, getErr
-		},
-	)
+	scaleSet, err := r.getScaleSetForUpdate(ctx, autoscaleSet, scalesetClient, logger)
 	if err != nil {
-		return r.updateStatusError(
-			ctx,
-			autoscaleSet,
-			"ScaleSetNotFound",
-			fmt.Sprintf("Failed to get scale set: %v", err),
-			logger,
-		)
+		return r.updateStatusError(ctx, autoscaleSet, "ScaleSetNotFound",
+			fmt.Sprintf("Failed to get scale set: %v", err), logger)
 	}
 
 	if err := r.Get(ctx, types.NamespacedName{
@@ -389,180 +273,128 @@ func (r *AutoscaleSetReconciler) updateScaleSet(
 		return ctrl.Result{}, err
 	}
 
-	// Check if labels need to be updated
-	desiredLabels := r.buildLabels(autoscaleSet)
-
-	labelsChanged := !labelsEqual(scaleSet.Labels, desiredLabels)
-	if labelsChanged {
-		logger.Info(
-			"Labels changed, updating scale set",
-			"scaleSetID", *autoscaleSet.Status.ScaleSetID,
-			"currentLabels", formatLabelsForLog(scaleSet.Labels),
-			"desiredLabels", formatLabelsForLog(desiredLabels),
-		)
-		updateScaleSet := &scaleset.RunnerScaleSet{
-			Name:          autoscaleSet.Spec.ScaleSetName,
-			RunnerGroupID: scaleSet.RunnerGroupID,
-			Labels:        desiredLabels,
-			RunnerSetting: scaleSet.RunnerSetting,
-		}
-
-		err := client.RetryWithBackoff(ctx, client.DefaultRetryConfig, func() error {
-			updated, retryErr := scalesetClient.UpdateRunnerScaleSet(
-				ctx,
-				*autoscaleSet.Status.ScaleSetID,
-				updateScaleSet,
-			)
-			if retryErr != nil {
-				return retryErr
-			}
-			if updated != nil {
-				logger.Info(
-					"Scale set updated by GitHub",
-					"scaleSetID", updated.ID,
-					"labels", formatLabelsForLog(updated.Labels),
-				)
-			}
-			scaleSet = updated
-			return nil
-		})
-
-		if err != nil {
-			logger.Error(
-				err,
-				"Failed to update scale set labels",
-				"scaleSetID", *autoscaleSet.Status.ScaleSetID,
-			)
-			return r.updateStatusError(
-				ctx,
-				autoscaleSet,
-				"ScaleSetUpdateFailed",
-				fmt.Sprintf("Failed to update scale set labels: %v", err),
-				logger,
-			)
-		}
-
-		logger.Info(
-			"Successfully updated scale set labels",
-			"scaleSetID", *autoscaleSet.Status.ScaleSetID,
-			"labels", formatLabelsForLog(scaleSet.Labels),
-		)
-
-		r.Recorder.Event(
-			autoscaleSet,
-			corev1.EventTypeNormal,
-			"ScaleSetLabelsUpdated",
-			fmt.Sprintf("Updated labels for scale set %d", *autoscaleSet.Status.ScaleSetID),
-		)
+	scaleSet, err = r.maybeUpdateScaleSetLabels(ctx, autoscaleSet, scalesetClient, scaleSet, logger)
+	if err != nil {
+		return r.updateStatusError(ctx, autoscaleSet, "ScaleSetUpdateFailed",
+			fmt.Sprintf("Failed to update scale set labels: %v", err), logger)
 	}
 
-	if scaleSet.Labels != nil {
-		autoscaleSet.Status.Labels = make([]scalesetv1alpha1.ScaleSetLabel, len(scaleSet.Labels))
-		for i, label := range scaleSet.Labels {
-			autoscaleSet.Status.Labels[i] = scalesetv1alpha1.ScaleSetLabel{
-				Type: label.Type,
-				Name: label.Name,
-			}
-		}
-	}
-
-	if scaleSet.Statistics != nil {
-		autoscaleSet.Status.CurrentRunners = int32(
-			scaleSet.Statistics.TotalRegisteredRunners,
-		)
-		autoscaleSet.Status.DesiredRunners = int32(
-			scaleSet.Statistics.TotalAssignedJobs,
-		)
-
-		metrics.ScaleSetStatistics.WithLabelValues(
-			autoscaleSet.Namespace,
-			autoscaleSet.Name,
-			"total_available_jobs",
-		).Set(float64(scaleSet.Statistics.TotalAvailableJobs))
-
-		metrics.ScaleSetStatistics.WithLabelValues(
-			autoscaleSet.Namespace,
-			autoscaleSet.Name,
-			"total_acquired_jobs",
-		).Set(float64(scaleSet.Statistics.TotalAcquiredJobs))
-
-		metrics.ScaleSetStatistics.WithLabelValues(
-			autoscaleSet.Namespace,
-			autoscaleSet.Name,
-			"total_assigned_jobs",
-		).Set(float64(scaleSet.Statistics.TotalAssignedJobs))
-
-		metrics.ScaleSetStatistics.WithLabelValues(
-			autoscaleSet.Namespace,
-			autoscaleSet.Name,
-			"total_running_jobs",
-		).Set(float64(scaleSet.Statistics.TotalRunningJobs))
-
-		metrics.ScaleSetStatistics.WithLabelValues(
-			autoscaleSet.Namespace,
-			autoscaleSet.Name,
-			"total_registered_runners",
-		).Set(float64(scaleSet.Statistics.TotalRegisteredRunners))
-
-		metrics.ScaleSetStatistics.WithLabelValues(
-			autoscaleSet.Namespace,
-			autoscaleSet.Name,
-			"total_busy_runners",
-		).Set(float64(scaleSet.Statistics.TotalBusyRunners))
-
-		metrics.ScaleSetStatistics.WithLabelValues(
-			autoscaleSet.Namespace,
-			autoscaleSet.Name,
-			"total_idle_runners",
-		).Set(float64(scaleSet.Statistics.TotalIdleRunners))
-	}
-
-	autoscaleSet.Status.Phase = "Active"
-	meta.SetStatusCondition(&autoscaleSet.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		Reason:             "ScaleSetActive",
-		Message:            "Scale set is active",
-		ObservedGeneration: autoscaleSet.Generation,
-	})
-
+	r.setUpdateScaleSetStatus(ctx, autoscaleSet, scaleSet)
 	if err := r.Status().Update(ctx, autoscaleSet); err != nil {
-		if errors.IsConflict(err) {
+		if k8serrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
-	if autoscaleSet.Spec.MinRunners != nil {
-		metrics.ScaleSetLimits.WithLabelValues(
-			autoscaleSet.Namespace,
-			autoscaleSet.Name,
-			"min_runners",
-		).Set(float64(*autoscaleSet.Spec.MinRunners))
-	}
-
-	if autoscaleSet.Spec.MaxRunners != nil {
-		metrics.ScaleSetLimits.WithLabelValues(
-			autoscaleSet.Namespace,
-			autoscaleSet.Name,
-			"max_runners",
-		).Set(float64(*autoscaleSet.Spec.MaxRunners))
-	}
-
-	metrics.AutoscaleSetTotal.WithLabelValues(
-		autoscaleSet.Namespace,
-		autoscaleSet.Status.Phase,
-	).Set(1)
-
+	r.recordUpdateScaleSetMetrics(autoscaleSet)
 	metrics.ReconciliationRate.WithLabelValues("autoscaleset", "success").Inc()
 	if autoscaleSet.Status.Phase == "Active" &&
-		meta.IsStatusConditionTrue(
-			autoscaleSet.Status.Conditions,
-			"Ready",
-		) {
-		return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
+		meta.IsStatusConditionTrue(autoscaleSet.Status.Conditions, "Ready") {
+		return ctrl.Result{RequeueAfter: constants.RequeueActiveInterval}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *AutoscaleSetReconciler) getScaleSetForUpdate(
+	ctx context.Context,
+	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
+	scalesetClient *scaleset.Client,
+	logger logr.Logger,
+) (*scaleset.RunnerScaleSet, error) {
+	return r.ClientFactory.GetCachedScaleSet(
+		*autoscaleSet.Status.ScaleSetID,
+		func() (*scaleset.RunnerScaleSet, error) {
+			ss, getErr := scalesetClient.GetRunnerScaleSetByID(ctx, *autoscaleSet.Status.ScaleSetID)
+			if getErr == nil && ss != nil {
+				logger.V(1).Info("Retrieved scale set from GitHub", "scaleSetID", ss.ID, "labels", formatLabelsForLog(ss.Labels))
+			}
+			return ss, getErr
+		},
+	)
+}
+
+func (r *AutoscaleSetReconciler) maybeUpdateScaleSetLabels(
+	ctx context.Context,
+	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
+	scalesetClient *scaleset.Client,
+	scaleSet *scaleset.RunnerScaleSet,
+	logger logr.Logger,
+) (*scaleset.RunnerScaleSet, error) {
+	desiredLabels := r.buildLabels(autoscaleSet)
+	if labelsEqual(scaleSet.Labels, desiredLabels) {
+		return scaleSet, nil
+	}
+	logger.Info("Labels changed, updating scale set",
+		"scaleSetID", *autoscaleSet.Status.ScaleSetID,
+		"currentLabels", formatLabelsForLog(scaleSet.Labels),
+		"desiredLabels", formatLabelsForLog(desiredLabels),
+	)
+	updateScaleSet := &scaleset.RunnerScaleSet{
+		Name:          autoscaleSet.Spec.ScaleSetName,
+		RunnerGroupID: scaleSet.RunnerGroupID,
+		Labels:        desiredLabels,
+		RunnerSetting: scaleSet.RunnerSetting,
+	}
+	var updated *scaleset.RunnerScaleSet
+	err := client.RetryWithBackoff(ctx, client.DefaultRetryConfig, func() error {
+		var retryErr error
+		updated, retryErr = scalesetClient.UpdateRunnerScaleSet(ctx, *autoscaleSet.Status.ScaleSetID, updateScaleSet)
+		if retryErr != nil {
+			return retryErr
+		}
+		if updated != nil {
+			logger.Info("Scale set updated by GitHub", "scaleSetID", updated.ID, "labels", formatLabelsForLog(updated.Labels))
+		}
+		return nil
+	})
+	if err != nil {
+		logger.Error(err, "Failed to update scale set labels", "scaleSetID", *autoscaleSet.Status.ScaleSetID)
+		return scaleSet, err
+	}
+	logger.Info("Successfully updated scale set labels", "scaleSetID", *autoscaleSet.Status.ScaleSetID, "labels", formatLabelsForLog(updated.Labels))
+	r.Recorder.Event(autoscaleSet, corev1.EventTypeNormal, "ScaleSetLabelsUpdated",
+		fmt.Sprintf("Updated labels for scale set %d", *autoscaleSet.Status.ScaleSetID),
+	)
+	return updated, nil
+}
+
+func (r *AutoscaleSetReconciler) setUpdateScaleSetStatus(
+	ctx context.Context,
+	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
+	scaleSet *scaleset.RunnerScaleSet,
+) {
+	if scaleSet.Labels != nil {
+		autoscaleSet.Status.Labels = make([]scalesetv1alpha1.ScaleSetLabel, len(scaleSet.Labels))
+		for i, label := range scaleSet.Labels {
+			autoscaleSet.Status.Labels[i] = scalesetv1alpha1.ScaleSetLabel{Type: label.Type, Name: label.Name}
+		}
+	}
+	if scaleSet.Statistics != nil {
+		autoscaleSet.Status.CurrentRunners = int32(scaleSet.Statistics.TotalRegisteredRunners)
+		autoscaleSet.Status.DesiredRunners = int32(scaleSet.Statistics.TotalAssignedJobs)
+		setScaleSetStatistics(autoscaleSet.Namespace, autoscaleSet.Name, scaleSet.Statistics)
+	} else {
+		count, err := r.countRunnerPodsForAutoscaleSet(ctx, autoscaleSet.Namespace, fmt.Sprintf("%d", *autoscaleSet.Status.ScaleSetID))
+		if err == nil {
+			autoscaleSet.Status.CurrentRunners = int32(count)
+		}
+	}
+	autoscaleSet.Status.Phase = "Active"
+	meta.SetStatusCondition(&autoscaleSet.Status.Conditions, metav1.Condition{
+		Type: "Ready", Status: metav1.ConditionTrue, Reason: "ScaleSetActive",
+		Message: "Scale set is active", ObservedGeneration: autoscaleSet.Generation,
+	})
+}
+
+func (r *AutoscaleSetReconciler) recordUpdateScaleSetMetrics(autoscaleSet *scalesetv1alpha1.AutoscaleSet) {
+	if autoscaleSet.Spec.MinRunners != nil {
+		metrics.ScaleSetLimits.WithLabelValues(autoscaleSet.Namespace, autoscaleSet.Name, "min_runners").Set(float64(*autoscaleSet.Spec.MinRunners))
+	}
+	if autoscaleSet.Spec.MaxRunners != nil {
+		metrics.ScaleSetLimits.WithLabelValues(autoscaleSet.Namespace, autoscaleSet.Name, "max_runners").Set(float64(*autoscaleSet.Spec.MaxRunners))
+	}
+	metrics.AutoscaleSetTotal.WithLabelValues(autoscaleSet.Namespace, autoscaleSet.Status.Phase).Set(1)
 }
 
 func (r *AutoscaleSetReconciler) handleDeletion(
@@ -570,65 +402,47 @@ func (r *AutoscaleSetReconciler) handleDeletion(
 	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
 	logger logr.Logger,
 ) (ctrl.Result, error) {
-	if !controllerutil.ContainsFinalizer(autoscaleSet, FinalizerName) {
+	if !controllerutil.ContainsFinalizer(autoscaleSet, constants.FinalizerName) {
 		return ctrl.Result{}, nil
 	}
 
 	if autoscaleSet.Status.ScaleSetID != nil {
-		scalesetClient, err := r.getScalesetClient(ctx, autoscaleSet)
-		if err != nil {
-			logger.Error(
-				err,
-				"Failed to create client for scale set deletion",
-				"scaleSetID", *autoscaleSet.Status.ScaleSetID,
-			)
-			return ctrl.Result{RequeueAfter: time.Minute}, err
+		if res, err := r.deleteScaleSetInGitHub(ctx, autoscaleSet, logger); err != nil {
+			return res, err
 		}
-
-		err = client.RetryWithBackoff(ctx, client.DefaultRetryConfig, func() error {
-			return scalesetClient.DeleteRunnerScaleSet(
-				ctx,
-				*autoscaleSet.Status.ScaleSetID,
-			)
-		})
-		if err != nil {
-			logger.Error(
-				err,
-				"Failed to delete scale set",
-				"scaleSetID", *autoscaleSet.Status.ScaleSetID,
-			)
-			return ctrl.Result{}, err
-		}
-
-		logger.Info(
-			"Deleted scale set",
-			"scaleSetID", *autoscaleSet.Status.ScaleSetID,
-		)
-		r.Recorder.Event(
-			autoscaleSet,
-			corev1.EventTypeNormal,
-			"ScaleSetDeleted",
-			fmt.Sprintf("Successfully deleted scale set with ID %d", *autoscaleSet.Status.ScaleSetID),
-		)
 	}
 
-	controllerutil.RemoveFinalizer(autoscaleSet, FinalizerName)
+	controllerutil.RemoveFinalizer(autoscaleSet, constants.FinalizerName)
 	if err := r.Update(ctx, autoscaleSet); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	metrics.ScaleSetOperations.WithLabelValues(
-		autoscaleSet.Namespace,
-		autoscaleSet.Name,
-		"delete",
-		"success",
-	).Inc()
+	metrics.ScaleSetOperations.WithLabelValues(autoscaleSet.Namespace, autoscaleSet.Name, "delete", "success").Inc()
+	metrics.AutoscaleSetTotal.WithLabelValues(autoscaleSet.Namespace, autoscaleSet.Status.Phase).Set(0)
+	return ctrl.Result{}, nil
+}
 
-	metrics.AutoscaleSetTotal.WithLabelValues(
-		autoscaleSet.Namespace,
-		autoscaleSet.Status.Phase,
-	).Set(0)
-
+func (r *AutoscaleSetReconciler) deleteScaleSetInGitHub(
+	ctx context.Context,
+	autoscaleSet *scalesetv1alpha1.AutoscaleSet,
+	logger logr.Logger,
+) (ctrl.Result, error) {
+	scalesetClient, err := r.ClientFactory.CreateClientForAutoscaleSet(ctx, autoscaleSet, client.SubsystemController)
+	if err != nil {
+		logger.Error(err, "Failed to create client for scale set deletion", "scaleSetID", *autoscaleSet.Status.ScaleSetID)
+		return ctrl.Result{RequeueAfter: constants.DeletionRequeueAfter}, err
+	}
+	err = client.RetryWithBackoff(ctx, client.DefaultRetryConfig, func() error {
+		return scalesetClient.DeleteRunnerScaleSet(ctx, *autoscaleSet.Status.ScaleSetID)
+	})
+	if err != nil {
+		logger.Error(err, "Failed to delete scale set", "scaleSetID", *autoscaleSet.Status.ScaleSetID)
+		return ctrl.Result{}, err
+	}
+	logger.Info("Deleted scale set", "scaleSetID", *autoscaleSet.Status.ScaleSetID)
+	r.Recorder.Event(autoscaleSet, corev1.EventTypeNormal, "ScaleSetDeleted",
+		fmt.Sprintf("Successfully deleted scale set with ID %d", *autoscaleSet.Status.ScaleSetID),
+	)
 	return ctrl.Result{}, nil
 }
 
@@ -638,24 +452,20 @@ func (r *AutoscaleSetReconciler) updateStatusError(
 	reason, message string,
 	logger logr.Logger,
 ) (ctrl.Result, error) {
-	if err := r.Get(ctx, types.NamespacedName{
-		Namespace: autoscaleSet.Namespace,
-		Name:      autoscaleSet.Name,
-	}, autoscaleSet); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	autoscaleSet.Status.Phase = "Error"
-	meta.SetStatusCondition(&autoscaleSet.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: autoscaleSet.Generation,
-	})
-
-	if err := r.Status().Update(ctx, autoscaleSet); err != nil {
-		if errors.IsConflict(err) {
+	key := types.NamespacedName{Namespace: autoscaleSet.Namespace, Name: autoscaleSet.Name}
+	obj := &scalesetv1alpha1.AutoscaleSet{}
+	err := RefetchAndUpdateStatus(ctx, r.Client, key, obj, func() {
+		obj.Status.Phase = "Error"
+		meta.SetStatusCondition(&obj.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: obj.Generation,
+		})
+	}, func(ctx context.Context, o k8sclient.Object) error { return r.Status().Update(ctx, o) })
+	if err != nil {
+		if errors.Is(err, ErrStatusConflict) {
 			return ctrl.Result{Requeue: true}, nil
 		}
 		return ctrl.Result{}, err
@@ -670,7 +480,7 @@ func (r *AutoscaleSetReconciler) updateStatusError(
 
 	metrics.AutoscaleSetTotal.WithLabelValues(
 		autoscaleSet.Namespace,
-		autoscaleSet.Status.Phase,
+		"Error",
 	).Set(1)
 
 	logger.Error(nil, message, "reason", reason)
@@ -682,7 +492,22 @@ func (r *AutoscaleSetReconciler) updateStatusError(
 		message,
 	)
 
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	return ctrl.Result{RequeueAfter: constants.RequeueErrorInterval}, nil
+}
+
+func (r *AutoscaleSetReconciler) countRunnerPodsForAutoscaleSet(
+	ctx context.Context,
+	namespace, scaleSetID string,
+) (int, error) {
+	list := &corev1.PodList{}
+	err := r.List(ctx, list,
+		k8sclient.InNamespace(namespace),
+		k8sclient.MatchingLabels{constants.LabelAutoscaleSet: scaleSetID},
+	)
+	if err != nil {
+		return 0, err
+	}
+	return len(list.Items), nil
 }
 
 func (r *AutoscaleSetReconciler) buildLabels(
@@ -769,6 +594,27 @@ func formatLabelsForLog(labels []scaleset.Label) string {
 		parts[i] = fmt.Sprintf("%s:%s", label.Type, label.Name)
 	}
 	return fmt.Sprintf("[%s]", strings.Join(parts, ", "))
+}
+
+func setScaleSetStatistics(ns, name string, s *scaleset.RunnerScaleSetStatistic) {
+	if s == nil {
+		return
+	}
+	stats := []struct {
+		label string
+		value float64
+	}{
+		{"total_available_jobs", float64(s.TotalAvailableJobs)},
+		{"total_acquired_jobs", float64(s.TotalAcquiredJobs)},
+		{"total_assigned_jobs", float64(s.TotalAssignedJobs)},
+		{"total_running_jobs", float64(s.TotalRunningJobs)},
+		{"total_registered_runners", float64(s.TotalRegisteredRunners)},
+		{"total_busy_runners", float64(s.TotalBusyRunners)},
+		{"total_idle_runners", float64(s.TotalIdleRunners)},
+	}
+	for _, st := range stats {
+		metrics.ScaleSetStatistics.WithLabelValues(ns, name, st.label).Set(st.value)
+	}
 }
 
 func (r *AutoscaleSetReconciler) mapSecretToAutoscaleSets(
