@@ -19,6 +19,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+var errGetterFailed = errors.New("getter failed")
+
 func TestNewCache(t *testing.T) {
 	c := NewCache(nil)
 	if c == nil {
@@ -140,13 +142,50 @@ func TestCache_GetGitHubAppConfig_Success(t *testing.T) {
 	if cfg.ClientID != "client-id" || cfg.InstallationID != 2 || cfg.PrivateKey != "pem-content" {
 		t.Errorf("config mismatch: %+v", cfg)
 	}
+	// Second call should hit cache
+	cfg2, err := c.GetGitHubAppConfig(ctx, "default", key, "client-id", 2)
+	if err != nil {
+		t.Fatalf("second GetGitHubAppConfig: %v", err)
+	}
+	if cfg2.ClientID != cfg.ClientID || cfg2.InstallationID != cfg.InstallationID ||
+		cfg2.PrivateKey != cfg.PrivateKey {
+		t.Error("cached config mismatch")
+	}
 }
 
 func TestCache_InvalidateSecret(t *testing.T) {
-	c := NewCache(fake.NewClientBuilder().Build())
+	ctx := context.Background()
 	key := types.NamespacedName{Namespace: "ns", Name: "secret"}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name},
+		Data:       map[string][]byte{"token": []byte("old")},
+	}
+	fakeClient := fake.NewClientBuilder().WithObjects(secret).Build()
+	c := NewCache(fakeClient)
+	cfg, err := c.GetPATConfig(ctx, key.Namespace, key)
+	if err != nil {
+		t.Fatalf("GetPATConfig (seed cache): %v", err)
+	}
+	if cfg.Token != "old" {
+		t.Errorf("initial token = %q, want old", cfg.Token)
+	}
+	// Mutate secret in the fake client so next Get sees new value
+	var updated corev1.Secret
+	if err := fakeClient.Get(ctx, key, &updated); err != nil {
+		t.Fatalf("Get secret for update: %v", err)
+	}
+	updated.Data["token"] = []byte("new")
+	if err := fakeClient.Update(ctx, &updated); err != nil {
+		t.Fatalf("Update secret: %v", err)
+	}
 	c.InvalidateSecret(key)
-	// No panic; next Get would miss cache
+	cfg2, err := c.GetPATConfig(ctx, key.Namespace, key)
+	if err != nil {
+		t.Fatalf("GetPATConfig after InvalidateSecret: %v", err)
+	}
+	if cfg2.Token != "new" {
+		t.Errorf("after InvalidateSecret token = %q, want new (cache was invalidated)", cfg2.Token)
+	}
 }
 
 func TestCache_GetScaleSet_MissThenHit(t *testing.T) {
@@ -198,5 +237,3 @@ func TestCache_Cleanup(t *testing.T) {
 	c := NewCache(fake.NewClientBuilder().Build())
 	c.Cleanup()
 }
-
-var errGetterFailed = errors.New("getter failed")

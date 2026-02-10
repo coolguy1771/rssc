@@ -1,0 +1,116 @@
+# Build and push container images: manager (controller) and optionally OLM bundle.
+# Attestations: provenance (SLSA) and SBOM are generated and attached to all pushed images.
+name: Build images
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CACHE_REF: ${{ github.repository }}-buildcache
+  BUNDLE_CACHE_REF: ${{ github.repository }}-bundle-buildcache
+
+jobs:
+  build-manager:
+    name: Build manager image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image tags
+        id: meta
+        run: |
+          TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
+          if [[ "${{ github.ref }}" == refs/heads/main ]]; then
+            TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"$'\n'"$TAGS"
+          fi
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}"$'\n'"$TAGS"
+          fi
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          echo "$TAGS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Build and push manager image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_REF }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_REF }},mode=max
+
+  build-bundle:
+    name: Build bundle image
+    runs-on: ubuntu-latest
+    needs: build-manager
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Generate bundle manifests
+        run: |
+          go mod tidy
+          make bundle VERSION=${{ github.ref_name }} IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push bundle image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: ./bundle.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-bundle:${{ github.ref_name }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.BUNDLE_CACHE_REF }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.BUNDLE_CACHE_REF }},mode=max

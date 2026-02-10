@@ -127,6 +127,10 @@ func TestIsRetryableError_NetTimeout(t *testing.T) {
 	}
 }
 
+// TestIsRetryableError_StatusCodes verifies retry behavior for HTTP status errors.
+// Retry detection expects errors containing "status=NNN" (parsed in internal/errors/errors.go).
+// The test constructs errors with errors.New("status=XXX"); RetryWithBackoff and RetryConfig
+// use isRetryableError so this test validates the contract between error string format and retry logic.
 func TestIsRetryableError_StatusCodes(t *testing.T) {
 	// 500, 429, 408 are retryable (we get initial + 1 retry = 2 calls with MaxRetries: 1)
 	// 404, 400 are not retryable (1 call then return)

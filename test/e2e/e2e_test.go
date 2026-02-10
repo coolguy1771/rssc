@@ -267,13 +267,21 @@ var _ = Describe("Manager", Ordered, func() {
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "apply AutoscaleSet: %s", output)
 
-			By("verifying AutoscaleSet exists and has been reconciled")
+			By("verifying AutoscaleSet exists and reaches Ready/Active status")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "autoscaleset", "autoscaleset-sample",
 					"-n", namespace, "-o", "jsonpath={.metadata.name}")
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(strings.TrimSpace(out)).To(Equal("autoscaleset-sample"))
+			}).Should(Succeed())
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "autoscaleset", "autoscaleset-sample",
+					"-n", namespace, "-o", "jsonpath={.status.phase}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(out)).To(Equal("Active"),
+					"AutoscaleSet status.phase should be Active when reconciled")
 			}).Should(Succeed())
 		})
 

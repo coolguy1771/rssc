@@ -9,6 +9,7 @@ package client
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/actions/scaleset"
@@ -23,7 +24,7 @@ func TestClientFactory_CreateClient_NoAuth(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when neither GitHubApp nor PAT provided")
 	}
-	if err.Error() != "either GitHubApp or PAT must be provided" {
+	if !strings.Contains(err.Error(), "GitHubApp or PAT") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -54,7 +55,7 @@ func TestClientFactory_CreateClient_PAT(t *testing.T) {
 		SystemInfo:      scaleset.SystemInfo{},
 	})
 	// We expect either success (client created) or an error (e.g. invalid URL)
-	if err != nil && err.Error() == "either GitHubApp or PAT must be provided" {
+	if err != nil && strings.Contains(err.Error(), "GitHubApp or PAT") {
 		t.Errorf("unexpected auth error: %v", err)
 	}
 }

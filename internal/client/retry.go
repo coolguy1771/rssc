@@ -23,6 +23,11 @@ var DefaultRetryConfig = RetryConfig{
 	BackoffMultiplier: 2.0,
 }
 
+// isRetryableError determines whether RetryWithBackoff will retry on the given error.
+// Retry detection expects errors to contain "status=NNN" (matching parsing in
+// internal/errors/errors.go). RetryWithBackoff and RetryConfig use this to decide
+// retries; the test TestIsRetryableError_StatusCodes constructs errors with
+// errors.New("status=XXX") to assert the contract between error string format and retry logic.
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false

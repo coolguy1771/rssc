@@ -110,16 +110,29 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test $(shell go list ./... | grep -v /test/) -coverprofile cover.out
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
+.PHONY: test-unit
+test-unit: ## Run unit tests (no envtest). Fast feedback for client, errors, metrics, scaler.
+	go test ./internal/client/... ./internal/errors/... ./internal/metrics/... ./internal/scaler/... -count=1 -coverprofile=cover_unit.out -timeout=120s
+
+.PHONY: coverage
+coverage: test ## Run full test suite and report coverage.
+	@go tool cover -func=cover.out | grep total
+
+.PHONY: coverage-check
+coverage-check: test ## Run tests and fail if total coverage is below 85%.
+	@cov=$$(go tool cover -func=cover.out | grep total | awk '{gsub(/%/,""); print $$3}'); \
+	echo "$$cov" | awk -v c="$$cov" 'BEGIN{if(c+0>=85){print "Coverage " c "% meets 85% threshold"; exit 0} else {print "Coverage " c "% is below 85% threshold"; exit 1}}'
+
+# TODO(user): To use a different vendor for e2e tests, modify the setup under 'test/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= oper-test-e2e
 
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
+setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist.
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -138,7 +151,7 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
+cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests.
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: lint
@@ -146,7 +159,7 @@ lint: golangci-lint ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run
 
 .PHONY: lint-fix
-lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
+lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
 	$(GOLANGCI_LINT) run --fix
 
 .PHONY: lint-config
@@ -307,7 +320,7 @@ endif
 
 .PHONY: bundle
 bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metadata, then validate generated files.
-	$(OPERATOR_SDK) generate kustomize manifests -q
+	$(OPERATOR_SDK) generate kustomize manifests --interactive=false -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
 	$(OPERATOR_SDK) bundle validate ./bundle
