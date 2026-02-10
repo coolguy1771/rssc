@@ -89,10 +89,12 @@ func (d *DebouncedScaler) HandleDesiredRunnerCount(ctx context.Context, count in
 
 	d.mu.Unlock()
 
-	// Wait for the debounced result or context cancellation
+	// Wait for the debounced result, our dctx cancellation (when superseded), or caller ctx
 	select {
 	case res := <-ch:
 		return res.count, res.err
+	case <-dctx.Done():
+		return 0, dctx.Err()
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}

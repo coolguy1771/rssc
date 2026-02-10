@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -258,14 +259,47 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput := getMetricsOutput()
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+		It("should accept AutoscaleSet CR and reconcile", func() {
+			By("applying sample AutoscaleSet in test namespace")
+			autoscaleSetSample := filepath.Join("..", "..", "config", "samples",
+				"scaleset_v1alpha1_autoscaleset.yaml")
+			cmd := exec.Command("kubectl", "apply", "-f", autoscaleSetSample, "-n", namespace)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "apply AutoscaleSet: %s", output)
+
+			By("verifying AutoscaleSet exists and has been reconciled")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "autoscaleset", "autoscaleset-sample",
+					"-n", namespace, "-o", "jsonpath={.metadata.name}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(out)).To(Equal("autoscaleset-sample"))
+			}).Should(Succeed())
+		})
+
+		It("should accept RunnerSet CR when AutoscaleSet exists", func() {
+			By("applying sample RunnerSet in test namespace")
+			runnerSetSample := filepath.Join("..", "..", "config", "samples",
+				"scaleset_v1alpha1_runnerset.yaml")
+			cmd := exec.Command("kubectl", "apply", "-f", runnerSetSample, "-n", namespace)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "apply RunnerSet: %s", output)
+
+			By("patching RunnerSet to reference AutoscaleSet in test namespace")
+			cmd = exec.Command("kubectl", "patch", "runnerset", "runnerset-sample", "-n", namespace,
+				"--type=merge", "-p", fmt.Sprintf(`{"spec":{"autoscaleSetRef":{"namespace":"%s"}}}`, namespace))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying RunnerSet exists")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "runnerset", "runnerset-sample",
+					"-n", namespace, "-o", "jsonpath={.metadata.name}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(out)).To(Equal("runnerset-sample"))
+			}).Should(Succeed())
+		})
 	})
 })
 
