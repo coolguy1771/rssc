@@ -1,6 +1,7 @@
+# PrometheusRule (../prometheus) is optional and requires the Prometheus Operator CRD.
+# Add ../prometheus to resources or apply config/prometheus separately when using Prometheus.
 resources:
 - ../crd
 - ../rbac
 - ../manager
-- ../prometheus
 - ../webhook
