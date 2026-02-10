@@ -3,7 +3,7 @@ module github.com/coolguy1771/rssc
 go 1.25.3
 
 require (
-	github.com/actions/scaleset v0.0.0-20260205125038-efa922e8dde8
+	github.com/actions/scaleset v0.1.0
 	github.com/go-logr/logr v1.4.3
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.28.1
